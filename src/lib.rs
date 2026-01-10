@@ -1,5 +1,5 @@
 use std::{fs::File, io::BufRead, path::Path, ops::{Add, Div, Range, Deref}, cell::Cell, borrow::Cow};
-use chrono::{Datelike, Months, NaiveDate, TimeDelta, Weekday};
+use chrono::{Datelike, Months, NaiveDate, Days, Weekday};
 use itertools::{Itertools, iproduct};
 
 use plotters::prelude::*;
@@ -119,6 +119,16 @@ impl DataColumn {
         DataColumn { header:header.into(), data: data.into() }
     }
 
+    fn fromf64(header: impl Into<String>, data: Vec<f64>) -> DataColumn
+    {
+        DataColumn::new(header, data)
+    }
+
+    fn fromdate(header: impl Into<String>, data: Vec<NaiveDate>) -> DataColumn
+    {
+        DataColumn::new(header, data)
+    }
+
     fn newf64(header: impl Into<String>) -> DataColumn
     {
         DataColumn { header:header.into(), data: AnyData::F64(vec![]) }
@@ -153,8 +163,9 @@ impl DataColumn {
             AnyData::F64(f) => {
                 f.push(to_f64(item).unwrap_or_default()); Some(())
             }
-            AnyData::DATE(d) => { 
-                to_date(item).map(|i| d.push(i))
+            AnyData::DATE(d) => {
+                let push_to_dates = |i| d.push(i);
+                to_date(item).map(push_to_dates)
             }
         }
     }
@@ -211,7 +222,7 @@ impl<'a> Deref for DateColumn<'a> {
 }
 
 fn read_data<P: AsRef<Path>>(input_file: &P)
-    -> Result<(Vec<DataColumn>,Vec<DataColumn>), Box<dyn std::error::Error>>
+    -> Result<DataPair, Box<dyn std::error::Error>>
 {
     let file = File::open(&input_file)?;
     let lines = std::io::BufReader::new(file).lines();
@@ -221,7 +232,8 @@ fn read_data<P: AsRef<Path>>(input_file: &P)
     lines.map(|l| l.expect("read file error!")).for_each(|line| {
         let mut item = line.split(",");
         if !data_columns.is_empty() {
-            data_columns.iter_mut().map_while(|v | v.push(&mut item)).count();
+            let push_item_into = |v: &mut DataColumn| v.push(&mut item);
+            data_columns.iter_mut().map_while(push_item_into).count();
         } else {
             data_columns.extend(item.map(DataColumn::newf64));
             data_columns[0].newdate();
@@ -233,27 +245,30 @@ fn read_data<P: AsRef<Path>>(input_file: &P)
         println!("#input item0 size: {}", data_columns[0].as_date_ref().unwrap().len());
         println!("#input itemE size: {}", data_columns.last().unwrap().as_f64_ref().unwrap().len());
         let copper_oil = data_columns.drain(1..=2).collect();
-        Ok((data_columns, copper_oil))
+        Ok((copper_oil, data_columns))
     } else { 
         Err("too few items".into())
     }
 }
 
-fn process_data((indices,copper_oil): (Vec<DataColumn>,Vec<DataColumn>))
-    -> Result<(Vec<DataColumn>, Vec<DataColumn>), Box<dyn std::error::Error>>
+fn process_data((copper_oil, indices): DataPair)
+    -> Result<DataPair, Box<dyn std::error::Error>>
 {
     println!("#rawdata indices {}", indices.len() - 1);
 
     let dates = indices.first().and_then(DataColumn::to_date).ok_or("date incorrect")?;
     let copper  = copper_oil.last().and_then(DataColumn::to_f64).ok_or("copper incorrect")?;
     let oil = copper_oil.first().and_then(DataColumn::to_f64).ok_or("oil incorrect")?;
+    let copper_oil = DataColumn::fromf64("铜油比", zip_copied(&copper,&oil).map(to_ratio).collect());
     
     let timedeltas = vec![90, 150];
 
-    let date_shift = |dt: i64| move |d: &NaiveDate| *d + TimeDelta::days(dt);
+    let date_shift = |dt: u64| move |d: &NaiveDate| d.checked_add_days(Days::new(dt));
+    let dates_shift = |dt| 
+        DataColumn::fromdate(format!("推后{dt}天"), dates.iter().filter_map(date_shift(dt)).collect());
+
     let copper_oil_ratio:Vec<DataColumn> = timedeltas.iter().copied()
-        .map(|dt| DataColumn::new(format!("推后{dt}天"), dates.iter().map(date_shift(dt)).collect::<Vec<NaiveDate>>()))
-        .chain(std::iter::once(DataColumn::new("铜油比", zip_copied(&copper,&oil).map(to_ratio).collect::<Vec<f64>>())))
+        .map(dates_shift).chain(std::iter::once(copper_oil))
         .collect();
 
     Ok((copper_oil_ratio, indices))
@@ -297,23 +312,24 @@ impl Ranged for DateRange {
         let max_num: u32 = hint.max_num_points().try_into().unwrap_or(u32::MAX);
         if max_num < 3 || years_cnt < 1 { return vec![]; } 
 
-        let y2date = | y:i32 | NaiveDate::from_ymd_opt(y, 1, 1).expect("years err");
+        let y2date = | y:i32 | NaiveDate::from_ymd_opt(y, 1, 1);
 
         if self.short && 6 * max_num > months_cnt {
-            let labelduration = [1u32, 2, 3, 4, 6].iter().copied().filter(|n| *n * max_num > months_cnt).min().expect("too many sample");
+            let too_few_points = |n: &u32| *n * max_num > months_cnt;
+            let labelduration = [1u32, 2, 3, 4, 6].iter().copied().filter(too_few_points).min().expect("too many sample");
 
             let remain = (self.start.month() - 1) % labelduration;
             let start_date = if remain == 0 {self.start} else {self.start + Months::new(labelduration - remain)};
 
             let start_month = to_month(&start_date);
             let start_month = if start_month < self.start { start_month + Months::new(labelduration) } else { start_month };
-            let end_month = y2date(end_year);
+            let end_month = y2date(end_year).expect("end year error?!");
 
-            return (0..months_cnt).map(|n| start_month + Months::new(labelduration * n))
-                .filter(|d| *d <= end_month).collect();
+            let nth_point = |n: u32| start_month + Months::new(labelduration * n);
+            return (0..months_cnt).map(nth_point).filter(ceiling(end_month)).collect();
         } else {
             let step = years_cnt.div(max_num) as usize + 1_usize;
-            return (start_year..end_year).step_by(step).map(y2date).collect();
+            return (start_year..end_year).step_by(step).filter_map(y2date).collect();
         }
     }
 
@@ -323,12 +339,14 @@ impl Ranged for DateRange {
 }
 
 type SampleData = (NaiveDate, f64);
+type DataPair = (Vec<DataColumn>, Vec<DataColumn>);
 
 fn first<T,U>(x: (T, U)) -> T { x.0 }
 fn second<T,U>(x: (T, U)) -> U { x.1 }
 fn accumulator<T: Add,U: Add>(x: (T, U), y: (T, U)) -> (T::Output, U::Output) {(x.0 + y.0, x.1 + y.1)}
 fn to_ratio<T, U>(x: (T, U)) -> T::Output where T: Div<U> { x.0 / x.1 }
 
+fn ceiling<T:PartialOrd>(max: T) -> impl Fn(&T) -> bool { move |x| *x <= max}
 fn floor1st<T:PartialOrd, U>(min: T) -> impl Fn(&(T, U)) -> bool { move |x| x.0 >= min }
 fn map1st<T,U,M>(f: impl Fn(&T) -> M) -> impl Fn(&(T, U)) -> M { move |x| f(&x.0) }
 
@@ -370,8 +388,8 @@ fn series4drawing(s1: &DataIter, s2: &DataIter, x_range: &DateRange, w: u32) -> 
     else                         { (series_lowfrq(cor_series, to_month),series_lowfrq(idx_series, to_month)) }
 }
 
-fn plot_range(s1: &DataIter, s2: &DataIter, short:bool)
-    -> Result<(DateRange, Range<f64>, Range<f64>), Box<dyn std::error::Error>> 
+fn plot_range(s1: &DataIter, s2: &DataIter, short:bool, w: u32)
+    -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn std::error::Error>> 
 {
     let (min1, max1) = s1.iter().map(first).minmax().into_option().ok_or("copper oil date range")?;
     let (min2, max2) = s2.iter().map(first).minmax().into_option().ok_or("index date range")?;
@@ -386,7 +404,9 @@ fn plot_range(s1: &DataIter, s2: &DataIter, short:bool)
     let yl_range = yl_min * 0.99..yl_max * 1.01;
     let yr_range = yr_min * 0.99..yr_max * 1.01;
 
-    Ok((x_range, yl_range, yr_range))
+    let (s1, s2) = series4drawing(s1, s2, &x_range, w);
+
+    Ok((s1, s2, x_range, yl_range, yr_range))
 }
 
 fn plot<P: AsRef<Path>>(file: &P, config: &PlotConfig, short:bool, s1: &DataIter, s2: &DataIter)
@@ -396,9 +416,7 @@ fn plot<P: AsRef<Path>>(file: &P, config: &PlotConfig, short:bool, s1: &DataIter
     let t2 = s2.header.as_ref();
     let caption = format!("{t2}与{t1}比较",);
 
-    let (x_range, yl_range, yr_range) = plot_range(s1, s2, short)?;
-
-    let (s1,s2) = series4drawing(s1, s2, &x_range, config.plot_width);
+    let (s1, s2, x_range, yl_range, yr_range) = plot_range(s1, s2, short, config.plot_width)?;
     println!("#size of series: {},{}", s1.len(), s2.len());
 
     let root = BitMapBackend::new(&file, config.plot_size()).into_drawing_area();
@@ -504,7 +522,7 @@ fn multi_y<'a>(data: &'a Vec<DataColumn>)
     Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(DataIter::with_x(x)).collect())
 }
 
-fn plot_data((copper_oil_ratio, indices): (Vec<DataColumn>, Vec<DataColumn>))
+fn plot_data((copper_oil_ratio, indices): DataPair)
     -> Result<(), Box<dyn std::error::Error>>
 {
     let copper_oil_ratio = multi_x(&copper_oil_ratio)?;
