@@ -6,30 +6,90 @@ use plotters::prelude::*;
 use plotters::coord::ranged1d::{DefaultFormatting, KeyPointHint, Ranged};
 use plotters::style::ShapeStyle;
 
-const PLOT_WIDTH:u32 = 1280;
-const PLOT_HEIGHT:u32 = 720;
-
-const TITLE_FONT:&str = "黑体";
-const TITLE_SIZE:f64 = 72.0;
-const TITLE_STYLE:(&str, f64) = (TITLE_FONT, TITLE_SIZE);
-
-const LABEL_FONT:&str = "仿宋";
-const LABEL_SIZE:f64 = 40.0;
-const LABEL_STYLE:(&str, f64) = (LABEL_FONT, LABEL_SIZE);
-const XLABELAREA_SIZE:i32 = 60;
-const YLABELAREA_SIZE:i32 = 120;
-
-const LEGEND_FONT:&str = "仿宋";
-const LEGEND_SIZE:f64 = 56.0;
-const LEGEND_STYLE:(&str, f64) = (LEGEND_FONT, LEGEND_SIZE);
-
-const LINE1_COLOR:RGBColor = BLUE;
-const LINE2_COLOR:RGBColor = RED;
-
-const STROKE_SIZE:u32 = 1;
-
 const SHORT_DURATION:Months = Months::new(36);
 const COPPER_OIL_RATIO_TOP:f64 = 205.0;
+
+struct PlotConfig {
+    plot_width: u32,
+    plot_height: u32,
+    
+    title_font: String,
+    title_size: f64,
+
+    label_font: String,
+    label_size: f64,
+
+    x_label_area_size: i32,
+    y_label_area_size: i32,
+
+    legend_font: String,
+    legend_size: f64,
+
+    line1_color: RGBColor,
+    line2_color: RGBColor,
+
+    stroke_size: u32,
+}
+
+impl Default for PlotConfig {
+    fn default() -> Self {
+        PlotConfig {
+            plot_width: 1280,
+            plot_height: 720,
+            
+            title_font: String::from("黑体"),
+            title_size: 72.0,
+
+            label_font: String::from("仿宋"),
+            label_size: 40.0,
+
+            x_label_area_size: 60,
+            y_label_area_size: 120,
+
+            legend_font: String::from("仿宋"),
+            legend_size: 56.0,
+
+            line1_color: BLUE,
+            line2_color: RED,
+
+            stroke_size: 1,
+        }
+    }
+}
+
+impl PlotConfig {
+    fn title_style(&self) -> (&str, f64) {
+        (self.title_font.as_str(), self.title_size)
+    }
+
+    fn label_style(&self) -> (&str, f64) {
+        (self.label_font.as_str(), self.label_size)
+    }
+
+    fn legend_style(&self) -> (&str, f64) {
+        (self.legend_font.as_str(), self.legend_size)
+    }
+
+    fn plot_size(&self) -> (u32, u32) {
+        (self.plot_width, self.plot_height)
+    }
+
+    fn line1_stroke_style(&self) -> ShapeStyle {
+        ShapeStyle {
+            color: self.line1_color.mix(1.0),
+            filled: true,
+            stroke_width: self.stroke_size,
+        }    
+    }
+
+    fn line2_stroke_style(&self) -> ShapeStyle {
+        ShapeStyle {
+            color: self.line2_color.mix(1.0),
+            filled: true,
+            stroke_width: self.stroke_size,
+        }    
+    }
+}
 
 enum AnyData {
     F64(Vec<f64>),
@@ -329,15 +389,7 @@ fn plot_range(s1: &DataIter, s2: &DataIter, short:bool)
     Ok((x_range, yl_range, yr_range))
 }
 
-fn line_stroke_style(color: &RGBColor) -> ShapeStyle {
-    ShapeStyle {
-        color: color.mix(1.0),
-        filled: true,
-        stroke_width: STROKE_SIZE,
-    }    
-}
-
-fn plot<P: AsRef<Path>>(file: &P, plotsize: (u32, u32), short:bool, s1: &DataIter, s2: &DataIter)
+fn plot<P: AsRef<Path>>(file: &P, config: &PlotConfig, short:bool, s1: &DataIter, s2: &DataIter)
     -> Result<(), Box<dyn std::error::Error>>
 {
     let t1 = s1.header.as_ref();
@@ -346,34 +398,34 @@ fn plot<P: AsRef<Path>>(file: &P, plotsize: (u32, u32), short:bool, s1: &DataIte
 
     let (x_range, yl_range, yr_range) = plot_range(s1, s2, short)?;
 
-    let (s1,s2) = series4drawing(s1, s2, &x_range, plotsize.0);
+    let (s1,s2) = series4drawing(s1, s2, &x_range, config.plot_width);
     println!("#size of series: {},{}", s1.len(), s2.len());
 
-    let root = BitMapBackend::new(&file, plotsize).into_drawing_area();
+    let root = BitMapBackend::new(&file, config.plot_size()).into_drawing_area();
     root.fill(&WHITE)?;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption(&caption, TITLE_STYLE)
-        .x_label_area_size(XLABELAREA_SIZE)
-        .y_label_area_size(YLABELAREA_SIZE)
+        .caption(&caption, config.title_style())
+        .x_label_area_size(config.x_label_area_size)
+        .y_label_area_size(config.y_label_area_size)
         .build_cartesian_2d(x_range.clone(), yl_range)?
         .set_secondary_coord(x_range, yr_range);
 
-    chart.draw_series(LineSeries::new(s2,line_stroke_style(&LINE2_COLOR)))?
-        .label(t2).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], LINE2_COLOR.filled()));
+    chart.draw_series(LineSeries::new(s2,config.line2_stroke_style()))?
+        .label(t2).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line2_color.filled()));
 
     chart.configure_mesh()
-        .x_label_style(LABEL_STYLE)
+        .x_label_style(config.label_style())
         .x_label_formatter(&|x| if x.month() == 1 { format!("{:0}年", x.year()) } else { format!("{:0}月", x.month()) } )
-        .y_label_style(LABEL_STYLE)
+        .y_label_style(config.label_style())
         .y_label_formatter(&|y| format!("{:0}", y))
         .draw()?;
 
-    chart.draw_secondary_series(LineSeries::new(s1,line_stroke_style(&LINE1_COLOR),))?
-        .label(t1).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], LINE1_COLOR.filled()));
+    chart.draw_secondary_series(LineSeries::new(s1,config.line1_stroke_style()))?
+        .label(t1).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line1_color.filled()));
 
     chart.configure_series_labels().position(SeriesLabelPosition::UpperLeft)
-        .border_style(BLACK).background_style(WHITE).label_font(LEGEND_STYLE)
+        .border_style(BLACK).background_style(WHITE).label_font(config.legend_style())
         .draw()?;
 
     root.present()?;
@@ -462,9 +514,10 @@ fn plot_data((copper_oil_ratio, indices): (Vec<DataColumn>, Vec<DataColumn>))
     let num = indices.len() * copper_oil_ratio.len() * shortaxis.len();
     let skip_counter = Cell::new(0_usize);
 
+    let config = PlotConfig::default();
     let plotter = |(n, (short, s1, s2)): PlotItem| {
         let file = format!("copper_oil_{:02}.png",num - n);
-        plot(&file, (PLOT_WIDTH, PLOT_HEIGHT), short, s1, s2)
+        plot(&file, &config, short, s1, s2)
             .inspect_err(|e| eprintln!("plot {file} err {e}!")).ok()
     };
 
