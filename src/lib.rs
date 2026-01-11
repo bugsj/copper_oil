@@ -22,7 +22,7 @@
 	SOFTWARE.
  */
 
-use std::{borrow::Cow, cell::Cell, io::{BufRead, Read}, ops::{Add, Deref, Div, Range}};
+use std::{borrow::Cow, cell::{Cell, OnceCell}, io::BufRead, ops::{Add, Deref, Div, Range}};
 use chrono::{Datelike, Months, NaiveDate, Days, Weekday, TimeDelta};
 use itertools::{Itertools, iproduct};
 use std::error::Error;
@@ -34,7 +34,6 @@ use plotters::style::ShapeStyle;
 use serde::{Serialize, Deserialize};
 use serde_json;
 
-const SHORT_DURATION:TimeDelta = TimeDelta::days(365 * 3);
 const COPPER_OIL_RATIO_TOP:f64 = 205.0;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -58,6 +57,9 @@ struct PlotConfig {
     line2_color: (u8, u8, u8),
 
     stroke_size: u32,
+
+    period: Vec<i64>,
+    date_shift: Vec<u64>,
 }
 
 impl Default for PlotConfig {
@@ -82,6 +84,9 @@ impl Default for PlotConfig {
             line2_color: (255, 0, 0),
 
             stroke_size: 1,
+
+            period: vec![0, 1095],
+            date_shift: vec![90, 150],
         }
     }
 }
@@ -293,7 +298,7 @@ fn read_data<P: AsRef<std::path::Path>>(input_file: &P)
     }
 }
 
-fn process_data(data: MainData)
+fn process_data((data, config): (MainData, &PlotConfig))
     -> Result<MainData, Box<dyn Error>>
 {
     let copper_oil = data.copper_oil;
@@ -305,7 +310,7 @@ fn process_data(data: MainData)
     let oil = copper_oil.first().and_then(DataColumn::to_f64).ok_or("oil incorrect")?;
     let copper_oil = DataColumn::fromf64("铜油比", zip_copied(&copper,&oil).map(to_ratio).collect());
     
-    let timedeltas = vec![90, 150];
+    let timedeltas = &config.date_shift;
 
     let date_shift = |dt: u64| move |d: &NaiveDate| d.checked_add_days(Days::new(dt));
     let dates_shift = |dt| 
@@ -566,12 +571,13 @@ fn multi_y<'a>(data: &'a Vec<DataColumn>)
     Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(PointIter::with_x(x)).collect())
 }
 
-fn plot_data((data, config): (MainData, PlotConfig))
+fn plot_data((data, config): (MainData, &PlotConfig))
     -> Result<(), Box<dyn Error>>
 {
     let copper_oil = multi_x(&data.copper_oil)?;
     let indices = multi_y(&data.indices)?;
-    let shortaxis = vec![None, Some(SHORT_DURATION)];
+    let shortaxis = config.period.iter().copied()
+        .map(|t| if t == 0 {None} else {Some(TimeDelta::days(t))}).collect::<Vec<_>>();
 
     let num = indices.len() * copper_oil.len() * shortaxis.len();
     let skip_counter = Cell::new(0_usize);
@@ -593,31 +599,29 @@ fn plot_data((data, config): (MainData, PlotConfig))
     Ok(())
 }
 
-fn load_conf<P: AsRef<std::path::Path>>(path: P) -> Option<PlotConfig> {
-    std::fs::File::open(path).ok()
-        .and_then(|mut f| {
-            let mut buf = String::from("");
-            f.read_to_string(&mut buf).and(Ok(buf)).ok()
-        })
-        .and_then(|conf_str| serde_json::from_str(conf_str.as_str()).ok())
+fn load_conf_file<P: AsRef<std::path::Path>>(path: P) -> Option<PlotConfig> {
+    let json2conf = |conf_str: String| serde_json::from_str(&conf_str).ok();
+    std::fs::read_to_string(path).ok().and_then(json2conf)
 }
 
 pub fn read_and_plot_data(mut args: impl Iterator<Item = String>)
     -> Result<(), Box<dyn Error>>
 {
-    let data_file = args.next();
-    let conf_file = args.next();
-    let load_conf_default = ||load_conf(".\\config.json");
+    let data_path = args.next();
+    let conf_path = args.next();
+    let conf = OnceCell::new();
 
-    let conf = conf_file.as_ref()
-        .and_then(load_conf)
+    let load_conf_default = ||load_conf_file(".\\config.json");
+    let load_conf = ||conf.get_or_init(||conf_path.as_ref()
+        .and_then(load_conf_file)
         .or_else(load_conf_default)
-        .unwrap_or_default();
+        .unwrap_or_default());
 
-    let insert_conf = |data| (data, conf);
-    data_file.as_ref().ok_or("too few argument".into())
+    let with_conf = |data| (data, load_conf());
+    data_path.as_ref().ok_or("too few argument".into())
         .and_then(read_data)
+        .map(with_conf)
         .and_then(process_data)
-        .map(insert_conf)
+        .map(with_conf)
         .and_then(plot_data)
 }

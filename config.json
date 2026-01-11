@@ -11,5 +11,7 @@
     "legend_size": 56.0,
     "line1_color": [0,0,255],
     "line2_color": [255,0,0],
-    "stroke_size": 1
+    "stroke_size": 1,
+    "period": [0, 1095],
+    "date_shift": [90, 150]
 }
