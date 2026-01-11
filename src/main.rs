@@ -6,7 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args();
     let cmd = args.next().expect("args error!?");
     if args.len() < 1 {
-        eprintln!("Usage: {} <input_file>", cmd);
+        eprintln!("Usage: {} <input_file> [config_file]", cmd);
         std::process::exit(1);
     }
     read_and_plot_data(args).inspect_err(|e| { eprintln!("error! {}", e); })

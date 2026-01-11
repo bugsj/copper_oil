@@ -542,17 +542,7 @@ fn multi_y<'a>(data: &'a Vec<DataColumn>)
     Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(PointIter::with_x(x)).collect())
 }
 
-fn load_conf_test() -> PlotConfig {
-    std::fs::File::open(".\\config.json").ok()
-        .and_then(|mut f| {
-            let mut buf = String::from("");
-            f.read_to_string(&mut buf).and(Ok(buf)).ok()
-        })
-        .and_then(|conf_str| serde_json::from_str(conf_str.as_str()).ok())
-        .unwrap_or_default()
-}
-
-fn plot_data(data: MainData)
+fn plot_data((data, config): (MainData, PlotConfig))
     -> Result<(), Box<dyn Error>>
 {
     let copper_oil = multi_x(&data.copper_oil)?;
@@ -561,8 +551,6 @@ fn plot_data(data: MainData)
 
     let num = indices.len() * copper_oil.len() * shortaxis.len();
     let skip_counter = Cell::new(0_usize);
-
-    let config = load_conf_test();
 
     let plotter = |(n, (duration, s1, s2)): PlotItem| {
         let file = format!("copper_oil_{:02}.png",num - n);
@@ -581,12 +569,31 @@ fn plot_data(data: MainData)
     Ok(())
 }
 
+fn load_conf<P: AsRef<std::path::Path>>(path: P) -> Option<PlotConfig> {
+    std::fs::File::open(path).ok()
+        .and_then(|mut f| {
+            let mut buf = String::from("");
+            f.read_to_string(&mut buf).and(Ok(buf)).ok()
+        })
+        .and_then(|conf_str| serde_json::from_str(conf_str.as_str()).ok())
+}
+
 pub fn read_and_plot_data(mut args: impl Iterator<Item = String>)
     -> Result<(), Box<dyn Error>>
 {
+    let data_file = args.next();
+    let conf_file = args.next();
+    let load_conf_default = ||load_conf(".\\config.json");
 
-    args.next().as_ref().ok_or("too few argument".into())
+    let conf = conf_file.as_ref()
+        .and_then(load_conf)
+        .or_else(load_conf_default)
+        .unwrap_or_default();
+
+    let insert_conf = |data| (data, conf);
+    data_file.as_ref().ok_or("too few argument".into())
         .and_then(read_data)
         .and_then(process_data)
+        .map(insert_conf)
         .and_then(plot_data)
 }
