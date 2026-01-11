@@ -1,14 +1,19 @@
-use std::{fs::File, io::BufRead, path::Path, ops::{Add, Div, Range, Deref}, cell::Cell, borrow::Cow};
-use chrono::{Datelike, Months, NaiveDate, Days, Weekday};
+use std::{borrow::Cow, cell::Cell, io::{BufRead, Read}, ops::{Add, Deref, Div, Range}};
+use chrono::{Datelike, Months, NaiveDate, Days, Weekday, TimeDelta};
 use itertools::{Itertools, iproduct};
+use std::error::Error;
 
 use plotters::prelude::*;
 use plotters::coord::ranged1d::{DefaultFormatting, KeyPointHint, Ranged};
 use plotters::style::ShapeStyle;
 
-const SHORT_DURATION:Months = Months::new(36);
+use serde::{Serialize, Deserialize};
+use serde_json;
+
+const SHORT_DURATION:TimeDelta = TimeDelta::days(365 * 3);
 const COPPER_OIL_RATIO_TOP:f64 = 205.0;
 
+#[derive(Serialize, Deserialize, Debug)]
 struct PlotConfig {
     plot_width: u32,
     plot_height: u32,
@@ -25,8 +30,8 @@ struct PlotConfig {
     legend_font: String,
     legend_size: f64,
 
-    line1_color: RGBColor,
-    line2_color: RGBColor,
+    line1_color: (u8, u8, u8),
+    line2_color: (u8, u8, u8),
 
     stroke_size: u32,
 }
@@ -49,8 +54,8 @@ impl Default for PlotConfig {
             legend_font: String::from("仿宋"),
             legend_size: 56.0,
 
-            line1_color: BLUE,
-            line2_color: RED,
+            line1_color: (0 ,0, 255),
+            line2_color: (255, 0, 0),
 
             stroke_size: 1,
         }
@@ -58,6 +63,14 @@ impl Default for PlotConfig {
 }
 
 impl PlotConfig {
+    fn line1_color(&self) -> RGBColor {
+        RGBColor(self.line1_color.0, self.line1_color.1, self.line1_color.2)
+    }
+
+    fn line2_color(&self) -> RGBColor {
+        RGBColor(self.line2_color.0, self.line2_color.1, self.line2_color.2)
+    }
+
     fn title_style(&self) -> (&str, f64) {
         (self.title_font.as_str(), self.title_size)
     }
@@ -76,7 +89,7 @@ impl PlotConfig {
 
     fn line1_stroke_style(&self) -> ShapeStyle {
         ShapeStyle {
-            color: self.line1_color.mix(1.0),
+            color: self.line1_color().mix(1.0),
             filled: true,
             stroke_width: self.stroke_size,
         }    
@@ -84,7 +97,7 @@ impl PlotConfig {
 
     fn line2_stroke_style(&self) -> ShapeStyle {
         ShapeStyle {
-            color: self.line2_color.mix(1.0),
+            color: self.line2_color().mix(1.0),
             filled: true,
             stroke_width: self.stroke_size,
         }    
@@ -221,10 +234,15 @@ impl<'a> Deref for DateColumn<'a> {
     }
 }
 
-fn read_data<P: AsRef<Path>>(input_file: &P)
-    -> Result<DataPair, Box<dyn std::error::Error>>
+struct MainData {
+    copper_oil: Vec<DataColumn>,
+    indices: Vec<DataColumn>,
+}
+
+fn read_data<P: AsRef<std::path::Path>>(input_file: &P)
+    -> Result<MainData, Box<dyn Error>>
 {
-    let file = File::open(&input_file)?;
+    let file = std::fs::File::open(&input_file)?;
     let lines = std::io::BufReader::new(file).lines();
 
     let mut data_columns: Vec<DataColumn> = Vec::with_capacity(6);
@@ -245,15 +263,17 @@ fn read_data<P: AsRef<Path>>(input_file: &P)
         println!("#input item0 size: {}", data_columns[0].as_date_ref().unwrap().len());
         println!("#input itemE size: {}", data_columns.last().unwrap().as_f64_ref().unwrap().len());
         let copper_oil = data_columns.drain(1..=2).collect();
-        Ok((copper_oil, data_columns))
+        Ok(MainData {copper_oil, indices: data_columns})
     } else { 
         Err("too few items".into())
     }
 }
 
-fn process_data((copper_oil, indices): DataPair)
-    -> Result<DataPair, Box<dyn std::error::Error>>
+fn process_data(data: MainData)
+    -> Result<MainData, Box<dyn Error>>
 {
+    let copper_oil = data.copper_oil;
+    let indices = data.indices;
     println!("#rawdata indices {}", indices.len() - 1);
 
     let dates = indices.first().and_then(DataColumn::to_date).ok_or("date incorrect")?;
@@ -267,11 +287,11 @@ fn process_data((copper_oil, indices): DataPair)
     let dates_shift = |dt| 
         DataColumn::fromdate(format!("推后{dt}天"), dates.iter().filter_map(date_shift(dt)).collect());
 
-    let copper_oil_ratio:Vec<DataColumn> = timedeltas.iter().copied()
+    let copper_oil:Vec<DataColumn> = timedeltas.iter().copied()
         .map(dates_shift).chain(std::iter::once(copper_oil))
         .collect();
 
-    Ok((copper_oil_ratio, indices))
+    Ok(MainData{copper_oil, indices})
 }
 
 #[derive(Clone)]
@@ -339,7 +359,6 @@ impl Ranged for DateRange {
 }
 
 type SampleData = (NaiveDate, f64);
-type DataPair = (Vec<DataColumn>, Vec<DataColumn>);
 
 fn first<T,U>(x: (T, U)) -> T { x.0 }
 fn second<T,U>(x: (T, U)) -> U { x.1 }
@@ -375,7 +394,7 @@ where
 fn to_month(d: &NaiveDate) -> NaiveDate { NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap() }
 fn to_week(d: &NaiveDate) -> NaiveDate { let w = d.iso_week(); NaiveDate::from_isoywd_opt(w.year(), w.week(), Weekday::Mon).unwrap() }
 
-fn series4drawing(s1: &DataIter, s2: &DataIter, x_range: &DateRange, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
+fn series4drawing(s1: &PointIter, s2: &PointIter, x_range: &DateRange, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
 {
     let x_min = x_range.start;
     let x_duration = (x_range.end - x_range.start).num_days();
@@ -388,15 +407,15 @@ fn series4drawing(s1: &DataIter, s2: &DataIter, x_range: &DateRange, w: u32) -> 
     else                         { (series_lowfrq(cor_series, to_month),series_lowfrq(idx_series, to_month)) }
 }
 
-fn plot_range(s1: &DataIter, s2: &DataIter, short:bool, w: u32)
-    -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn std::error::Error>> 
+fn plot_range(s1: &PointIter, s2: &PointIter, duration: &Option<TimeDelta>, w: u32)
+    -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn Error>> 
 {
     let (min1, max1) = s1.iter().map(first).minmax().into_option().ok_or("copper oil date range")?;
     let (min2, max2) = s2.iter().map(first).minmax().into_option().ok_or("index date range")?;
     let x_max = max1.max(max2);
     let x_min = min1.max(min2);
-    let x_min = if short { x_min.max(x_max - SHORT_DURATION) } else { x_min }; // short = late
-    let x_range = DateRange::new(x_min, x_max, short);
+    let x_min = duration.map(|dt| x_min.max(x_max - dt)).unwrap_or(x_min);
+    let x_range = DateRange::new(x_min, x_max, duration.is_some());
 
     let (yl_min, yl_max) = s2.iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("index range")?;
     let (yr_min, yr_max) = s1.iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("copper oil range")?;
@@ -409,14 +428,15 @@ fn plot_range(s1: &DataIter, s2: &DataIter, short:bool, w: u32)
     Ok((s1, s2, x_range, yl_range, yr_range))
 }
 
-fn plot<P: AsRef<Path>>(file: &P, config: &PlotConfig, short:bool, s1: &DataIter, s2: &DataIter)
-    -> Result<(), Box<dyn std::error::Error>>
+fn plot<P: AsRef<std::path::Path>>(file: &P, config: &PlotConfig, duration: &Option<TimeDelta>, s1: &PointIter, s2: &PointIter)
+    -> Result<(), Box<dyn Error>>
 {
     let t1 = s1.header.as_ref();
     let t2 = s2.header.as_ref();
     let caption = format!("{t2}与{t1}比较",);
 
-    let (s1, s2, x_range, yl_range, yr_range) = plot_range(s1, s2, short, config.plot_width)?;
+    let (s1, s2, x_range, yl_range, yr_range)
+        = plot_range(s1, s2, duration, config.plot_width)?;
     println!("#size of series: {},{}", s1.len(), s2.len());
 
     let root = BitMapBackend::new(&file, config.plot_size()).into_drawing_area();
@@ -430,7 +450,7 @@ fn plot<P: AsRef<Path>>(file: &P, config: &PlotConfig, short:bool, s1: &DataIter
         .set_secondary_coord(x_range, yr_range);
 
     chart.draw_series(LineSeries::new(s2,config.line2_stroke_style()))?
-        .label(t2).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line2_color.filled()));
+        .label(t2).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line2_color().filled()));
 
     chart.configure_mesh()
         .x_label_style(config.label_style())
@@ -440,7 +460,7 @@ fn plot<P: AsRef<Path>>(file: &P, config: &PlotConfig, short:bool, s1: &DataIter
         .draw()?;
 
     chart.draw_secondary_series(LineSeries::new(s1,config.line1_stroke_style()))?
-        .label(t1).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line1_color.filled()));
+        .label(t1).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line1_color().filled()));
 
     chart.configure_series_labels().position(SeriesLabelPosition::UpperLeft)
         .border_style(BLACK).background_style(WHITE).label_font(config.legend_style())
@@ -461,31 +481,31 @@ where
     x.into_iter().copied().zip(y.into_iter().copied())
 }
 
-struct DataIter<'a> {
+struct PointIter<'a> {
     x: DateColumn<'a>,
     y: F64Column<'a>,
     header: Cow<'a, str>,
 }
 
-impl<'a> DataIter<'a> {
-    fn new<S: Into<Cow<'a, str>>>(header: S, x: DateColumn<'a>, y: F64Column<'a>)->DataIter<'a> 
+impl<'a> PointIter<'a> {
+    fn new<S: Into<Cow<'a, str>>>(header: S, x: DateColumn<'a>, y: F64Column<'a>)->PointIter<'a> 
     {
         assert!(x.len() == y.len(), "x序列与y序列长度不一致");
-        DataIter{ x, y, header: header.into() } 
+        PointIter{ x, y, header: header.into() } 
     }
 
-    fn with_y(y: F64Column<'a>)->impl Fn(DateColumn<'a>)->DataIter<'a> 
-    { move |x: DateColumn<'a>| DataIter::new(format!("{}({})",y.header,x.header), x, y) }
+    fn with_y(y: F64Column<'a>)->impl Fn(DateColumn<'a>)->PointIter<'a> 
+    { move |x: DateColumn<'a>| PointIter::new(format!("{}({})",y.header,x.header), x, y) }
 
-    fn with_x(x: DateColumn<'a>)->impl Fn(F64Column<'a>)->DataIter<'a> {
-        move |y: F64Column<'a>| DataIter::new(y.header, x, y)
+    fn with_x(x: DateColumn<'a>)->impl Fn(F64Column<'a>)->PointIter<'a> {
+        move |y: F64Column<'a>| PointIter::new(y.header, x, y)
     }
 
     fn iter(&self) -> impl Iterator<Item = SampleData>
     { zip_copied(&self.x, &self.y).filter(samplefilter) }
 }
 
-type PlotItem<'a> = (usize,(bool,&'a DataIter<'a>,&'a DataIter<'a>));
+type PlotItem<'a> = (usize,(&'a Option<TimeDelta>,&'a PointIter<'a>,&'a PointIter<'a>));
 
 fn except_index<S: AsRef<str>>(name: S)
     -> impl Fn(&PlotItem) -> bool
@@ -509,49 +529,62 @@ fn skip_cnt(counter: &Cell<usize> ,f: impl Fn(&PlotItem) -> bool)
 }
 
 fn multi_x<'a>(data: &'a Vec<DataColumn>)
-    -> Result<Vec<DataIter<'a>>, Box<dyn std::error::Error>>
+    -> Result<Vec<PointIter<'a>>, Box<dyn Error>>
 {
     let y = data.last().and_then(DataColumn::to_f64).ok_or("multi_x y incorrect")?;
-    Ok(data.iter().rev().filter_map(DataColumn::to_date).map(DataIter::with_y(y)).collect())
+    Ok(data.iter().rev().filter_map(DataColumn::to_date).map(PointIter::with_y(y)).collect())
 }
 
 fn multi_y<'a>(data: &'a Vec<DataColumn>)
-    -> Result<Vec<DataIter<'a>>, Box<dyn std::error::Error>>
+    -> Result<Vec<PointIter<'a>>, Box<dyn Error>>
 {
     let x = data.first().and_then(DataColumn::to_date).ok_or("multi_y x incorrect")?;
-    Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(DataIter::with_x(x)).collect())
+    Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(PointIter::with_x(x)).collect())
 }
 
-fn plot_data((copper_oil_ratio, indices): DataPair)
-    -> Result<(), Box<dyn std::error::Error>>
-{
-    let copper_oil_ratio = multi_x(&copper_oil_ratio)?;
-    let indices = multi_y(&indices)?;
-    let shortaxis = vec![false, true];
+fn load_conf_test() -> PlotConfig {
+    std::fs::File::open(".\\config.json").ok()
+        .and_then(|mut f| {
+            let mut buf = String::from("");
+            f.read_to_string(&mut buf).and(Ok(buf)).ok()
+        })
+        .and_then(|conf_str| serde_json::from_str(conf_str.as_str()).ok())
+        .unwrap_or_default()
+}
 
-    let num = indices.len() * copper_oil_ratio.len() * shortaxis.len();
+fn plot_data(data: MainData)
+    -> Result<(), Box<dyn Error>>
+{
+    let copper_oil = multi_x(&data.copper_oil)?;
+    let indices = multi_y(&data.indices)?;
+    let shortaxis = vec![None, Some(SHORT_DURATION)];
+
+    let num = indices.len() * copper_oil.len() * shortaxis.len();
     let skip_counter = Cell::new(0_usize);
 
-    let config = PlotConfig::default();
-    let plotter = |(n, (short, s1, s2)): PlotItem| {
+    let config = load_conf_test();
+
+    let plotter = |(n, (duration, s1, s2)): PlotItem| {
         let file = format!("copper_oil_{:02}.png",num - n);
-        plot(&file, &config, short, s1, s2)
-            .inspect_err(|e| eprintln!("plot {file} err {e}!")).ok()
+        let print_err = |e: &Box<dyn Error>| eprintln!("plot {file} err {e}!");
+        plot(&file, &config, duration, s1, s2).inspect_err(print_err).ok()
     };
 
     let cnt = 
-    iproduct!(shortaxis.iter().copied(), copper_oil_ratio.iter(), indices.iter())
+    iproduct!(shortaxis.iter(), copper_oil.iter(), indices.iter())
         .enumerate()
         .filter(skip_cnt(&skip_counter, except_index("恒生指数")))
         .filter_map(plotter).count();
 
-    println!("{cnt}/{num} files generated, {} files skipped, {} files error!", skip_counter.get(), num - cnt - skip_counter.get());
+    println!("{cnt}/{num} files generated, {} files skipped, {} files error!",
+                skip_counter.get(), num - cnt - skip_counter.get());
     Ok(())
 }
 
 pub fn read_and_plot_data(mut args: impl Iterator<Item = String>)
-    -> Result<(), Box<dyn std::error::Error>>
+    -> Result<(), Box<dyn Error>>
 {
+
     args.next().as_ref().ok_or("too few argument".into())
         .and_then(read_data)
         .and_then(process_data)

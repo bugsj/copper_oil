@@ -1,0 +1,15 @@
+{
+    "plot_width": 1280,
+    "plot_height": 720,
+    "title_font": "黑体",
+    "title_size": 72.0,
+    "label_font": "仿宋",
+    "label_size": 40.0,
+    "x_label_area_size": 60,
+    "y_label_area_size": 120,
+    "legend_font": "仿宋",
+    "legend_size": 56.0,
+    "line1_color": [0,0,255],
+    "line2_color": [255,0,0],
+    "stroke_size": 1
+}
