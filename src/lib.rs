@@ -22,7 +22,7 @@
 	SOFTWARE.
  */
 
-use std::{borrow::Cow, cell::{Cell, OnceCell}, io::BufRead, ops::{Add, Deref, Div, Range}};
+use std::{borrow::Cow, cell::{Cell, OnceCell, LazyCell}, io::BufRead, ops::{Add, Deref, Div, Range}};
 use chrono::{Datelike, Months, NaiveDate, Days, Weekday, TimeDelta};
 use itertools::{Itertools, iproduct};
 use std::error::Error;
@@ -36,7 +36,7 @@ use serde_json;
 
 const COPPER_OIL_RATIO_TOP:f64 = 205.0;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 struct PlotConfig {
     plot_width: u32,
     plot_height: u32,
@@ -53,51 +53,90 @@ struct PlotConfig {
     legend_font: String,
     legend_size: f64,
 
-    line1_color: (u8, u8, u8),
-    line2_color: (u8, u8, u8),
+    line1_color_str: String,
+    line2_color_str: String,
+
+    #[serde(skip)]
+    line1_color: OnceCell<RGBColor>,
+    #[serde(skip)]
+    line2_color: OnceCell<RGBColor>,
 
     stroke_size: u32,
+    short_period: i64,
+}
 
-    period: Vec<i64>,
+#[derive(Serialize, Deserialize)]
+struct DataConfig {
     date_shift: Vec<u64>,
 }
 
-impl Default for PlotConfig {
+#[derive(Serialize, Deserialize)]
+struct Config {
+    data_conf: DataConfig,
+    plot_conf: PlotConfig
+}
+
+impl Default for Config {
     fn default() -> Self {
-        PlotConfig {
-            plot_width: 1280,
-            plot_height: 720,
-            
-            title_font: String::from("黑体"),
-            title_size: 72.0,
+        Config {
+            plot_conf: PlotConfig {
+                plot_width: 1280,
+                plot_height: 720,
+                
+                title_font: String::from("黑体"),
+                title_size: 72.0,
 
-            label_font: String::from("仿宋"),
-            label_size: 40.0,
+                label_font: String::from("仿宋"),
+                label_size: 40.0,
 
-            x_label_area_size: 60,
-            y_label_area_size: 120,
+                x_label_area_size: 60,
+                y_label_area_size: 120,
 
-            legend_font: String::from("仿宋"),
-            legend_size: 56.0,
+                legend_font: String::from("仿宋"),
+                legend_size: 56.0,
 
-            line1_color: (0 ,0, 255),
-            line2_color: (255, 0, 0),
+                line1_color_str: String::from("RED"),
+                line2_color_str: String::from("BLUE"),
 
-            stroke_size: 1,
+                line1_color: OnceCell::new(),
+                line2_color: OnceCell::new(),
 
-            period: vec![0, 1095],
-            date_shift: vec![90, 150],
+                stroke_size: 1,
+
+                short_period: 1095,
+            },
+            data_conf: DataConfig {
+                date_shift: vec![90, 150]
+            }
         }
     }
 }
 
+macro_rules! str2color {
+    ($e:expr; $($c:ident),+; $d:expr) => {
+        match $e {
+            $(stringify!($c) => $c,)+
+            _ => $d,
+        }
+    };
+}
+
 impl PlotConfig {
+    fn digi2color(color: &str) -> RGBColor {
+        let color: Vec<u8> = color.split(",").filter_map(|s| s.trim().parse::<u8>().ok()).collect();
+        if color.len() == 3 {RGBColor(color[0], color[1], color[2])} else {BLACK}
+    }
+
+    fn str2color(color: &str) -> RGBColor {
+        str2color!(color; BLACK, BLUE, CYAN, GREEN, MAGENTA, RED, WHITE, YELLOW; PlotConfig::digi2color(color))
+    }
+
     fn line1_color(&self) -> RGBColor {
-        RGBColor(self.line1_color.0, self.line1_color.1, self.line1_color.2)
+        self.line1_color.get_or_init(|| PlotConfig::str2color(&self.line1_color_str)).to_owned()
     }
 
     fn line2_color(&self) -> RGBColor {
-        RGBColor(self.line2_color.0, self.line2_color.1, self.line2_color.2)
+        self.line2_color.get_or_init(|| PlotConfig::str2color(&self.line2_color_str)).to_owned()
     }
 
     fn title_style(&self) -> (&str, f64) {
@@ -298,7 +337,7 @@ fn read_data<P: AsRef<std::path::Path>>(input_file: &P)
     }
 }
 
-fn process_data((data, config): (MainData, &PlotConfig))
+fn process_data((data, config): (MainData, &DataConfig))
     -> Result<MainData, Box<dyn Error>>
 {
     let copper_oil = data.copper_oil;
@@ -576,8 +615,7 @@ fn plot_data((data, config): (MainData, &PlotConfig))
 {
     let copper_oil = multi_x(&data.copper_oil)?;
     let indices = multi_y(&data.indices)?;
-    let shortaxis = config.period.iter().copied()
-        .map(|t| if t == 0 {None} else {Some(TimeDelta::days(t))}).collect::<Vec<_>>();
+    let shortaxis = vec![None, Some(TimeDelta::days(config.short_period))];
 
     let num = indices.len() * copper_oil.len() * shortaxis.len();
     let skip_counter = Cell::new(0_usize);
@@ -599,29 +637,30 @@ fn plot_data((data, config): (MainData, &PlotConfig))
     Ok(())
 }
 
-fn load_conf_file<P: AsRef<std::path::Path>>(path: P) -> Option<PlotConfig> {
+fn load_conf_file<P: AsRef<std::path::Path>>(path: P) -> Option<Config> {
     let json2conf = |conf_str: String| serde_json::from_str(&conf_str).ok();
     std::fs::read_to_string(path).ok().and_then(json2conf)
+}
+
+fn with_conf<'a, D, C>(conf: &'a C) -> impl Fn(D) -> (D, &'a C) {
+    move |data: D| (data, conf)
 }
 
 pub fn read_and_plot_data(mut args: impl Iterator<Item = String>)
     -> Result<(), Box<dyn Error>>
 {
+    let load_conf_default = ||load_conf_file(".\\config.json");
     let data_path = args.next();
     let conf_path = args.next();
-    let conf = OnceCell::new();
-
-    let load_conf_default = ||load_conf_file(".\\config.json");
-    let load_conf = ||conf.get_or_init(||conf_path.as_ref()
+    let conf = LazyCell::new(||conf_path.as_ref()
         .and_then(load_conf_file)
         .or_else(load_conf_default)
         .unwrap_or_default());
 
-    let with_conf = |data| (data, load_conf());
     data_path.as_ref().ok_or("too few argument".into())
         .and_then(read_data)
-        .map(with_conf)
+        .map(with_conf(&conf.data_conf))
         .and_then(process_data)
-        .map(with_conf)
+        .map(with_conf(&conf.plot_conf))
         .and_then(plot_data)
 }
