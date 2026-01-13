@@ -22,7 +22,7 @@
 	SOFTWARE.
  */
 
-use std::{borrow::Cow, cell::{Cell, OnceCell, LazyCell}, io::BufRead, ops::{Add, Deref, Div, Range}};
+use std::{borrow::Cow, cell::{Cell, LazyCell, OnceCell}, io::BufRead, num::NonZero, ops::{Add, Deref, Div, Range}};
 use chrono::{Datelike, Months, NaiveDate, Days, Weekday, TimeDelta};
 use itertools::{Itertools, iproduct};
 use std::error::Error;
@@ -37,7 +37,7 @@ use serde_json;
 const COPPER_OIL_RATIO_TOP:f64 = 205.0;
 
 #[derive(Serialize, Deserialize)]
-struct PlotConfig {
+struct PlotConfigData {
     plot_width: u32,
     plot_height: u32,
     
@@ -66,20 +66,20 @@ struct PlotConfig {
 }
 
 #[derive(Serialize, Deserialize)]
-struct DataConfig {
+struct DataConfigData {
     date_shift: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Config {
-    data_conf: DataConfig,
-    plot_conf: PlotConfig
+    data_conf: DataConfigData,
+    plot_conf: PlotConfigData
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            plot_conf: PlotConfig {
+            plot_conf: PlotConfigData {
                 plot_width: 1280,
                 plot_height: 720,
                 
@@ -105,7 +105,7 @@ impl Default for Config {
 
                 short_period: 1095,
             },
-            data_conf: DataConfig {
+            data_conf: DataConfigData {
                 date_shift: vec![90, 150]
             }
         }
@@ -121,22 +121,69 @@ macro_rules! str2color {
     };
 }
 
-impl PlotConfig {
+trait DataConfig {
+    fn date_shift(&self) -> &Vec<u64>;
+}
+
+impl DataConfig for DataConfigData {
+    fn date_shift(&self) -> &Vec<u64> {
+        &self.date_shift
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Period {
+    days: NonZero<i64>, 
+}
+
+impl From<Period> for TimeDelta {
+    fn from(value: Period) -> Self {
+        TimeDelta::days(value.days.get())
+    }
+}
+
+trait PlotConfig {
+    fn x_label_area_size(&self) -> i32;
+    fn y_label_area_size(&self) -> i32;
+    fn line1_color(&self) -> RGBColor;
+    fn line2_color(&self) -> RGBColor;
+    fn title_style(&self) -> (&str, f64);
+    fn label_style(&self) -> (&str, f64);
+    fn legend_style(&self) -> (&str, f64);
+    fn plot_size(&self) -> (u32, u32);
+    fn plot_width(&self) -> u32;
+    //fn plot_height(&self) -> u32;
+    fn line1_stroke_style(&self) -> ShapeStyle;
+    fn line2_stroke_style(&self) -> ShapeStyle;
+    fn period(&self) -> Vec<Option<Period>>;
+}
+
+impl PlotConfigData {
     fn digi2color(color: &str) -> RGBColor {
         let color: Vec<u8> = color.split(",").filter_map(|s| s.trim().parse::<u8>().ok()).collect();
         if color.len() == 3 {RGBColor(color[0], color[1], color[2])} else {BLACK}
     }
 
     fn str2color(color: &str) -> RGBColor {
-        str2color!(color; BLACK, BLUE, CYAN, GREEN, MAGENTA, RED, WHITE, YELLOW; PlotConfig::digi2color(color))
+        str2color!(color; BLACK, BLUE, CYAN, GREEN, MAGENTA, RED, WHITE, YELLOW; PlotConfigData::digi2color(color))
+    }
+}
+
+impl PlotConfig for PlotConfigData {
+    fn x_label_area_size(&self) -> i32 {
+        self.x_label_area_size
+    }
+
+    fn y_label_area_size(&self) -> i32 {
+        self.y_label_area_size
     }
 
     fn line1_color(&self) -> RGBColor {
-        self.line1_color.get_or_init(|| PlotConfig::str2color(&self.line1_color_str)).to_owned()
+        self.line1_color.get_or_init(||PlotConfigData::str2color(&self.line1_color_str)).to_owned()
     }
 
     fn line2_color(&self) -> RGBColor {
-        self.line2_color.get_or_init(|| PlotConfig::str2color(&self.line2_color_str)).to_owned()
+        self.line2_color.get_or_init(||PlotConfigData::str2color(&self.line2_color_str)).to_owned()
     }
 
     fn title_style(&self) -> (&str, f64) {
@@ -155,6 +202,14 @@ impl PlotConfig {
         (self.plot_width, self.plot_height)
     }
 
+    fn plot_width(&self) -> u32 {
+        self.plot_width
+    }
+
+    //fn plot_height(&self) -> u32 {
+    //    self.plot_height
+    //}
+
     fn line1_stroke_style(&self) -> ShapeStyle {
         ShapeStyle {
             color: self.line1_color().mix(1.0),
@@ -168,7 +223,11 @@ impl PlotConfig {
             color: self.line2_color().mix(1.0),
             filled: true,
             stroke_width: self.stroke_size,
-        }    
+        }
+    }
+
+    fn period(&self) -> Vec<Option<Period>> {
+        vec![None, NonZero::new(self.short_period).map(|d| Period {days: d})]
     }
 }
 
@@ -337,7 +396,7 @@ fn read_data<P: AsRef<std::path::Path>>(input_file: &P)
     }
 }
 
-fn process_data((data, config): (MainData, &DataConfig))
+fn process_data((data, config): (MainData, &impl DataConfig))
     -> Result<MainData, Box<dyn Error>>
 {
     let copper_oil = data.copper_oil;
@@ -349,7 +408,7 @@ fn process_data((data, config): (MainData, &DataConfig))
     let oil = copper_oil.first().and_then(DataColumn::to_f64).ok_or("oil incorrect")?;
     let copper_oil = DataColumn::fromf64("铜油比", zip_copied(&copper,&oil).map(to_ratio).collect());
     
-    let timedeltas = &config.date_shift;
+    let timedeltas = &config.date_shift();
 
     let date_shift = |dt: u64| move |d: &NaiveDate| d.checked_add_days(Days::new(dt));
     let dates_shift = |dt| 
@@ -462,8 +521,12 @@ where
 fn to_month(d: &NaiveDate) -> NaiveDate { NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap() }
 fn to_week(d: &NaiveDate) -> NaiveDate { let w = d.iso_week(); NaiveDate::from_isoywd_opt(w.year(), w.week(), Weekday::Mon).unwrap() }
 
-fn series4drawing(s1: &PointIter, s2: &PointIter, x_range: &DateRange, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
+fn series4drawing<I, R>(s1: &I, s2: &I, x_range: &R, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
+where
+    R: Ranged<ValueType = NaiveDate>,
+    I: PtIterator,
 {
+    let x_range = x_range.range();
     let x_min = x_range.start;
     let x_duration = (x_range.end - x_range.start).num_days();
     let cor_series = s1.iter().filter(floor1st(x_min));
@@ -475,14 +538,14 @@ fn series4drawing(s1: &PointIter, s2: &PointIter, x_range: &DateRange, w: u32) -
     else                         { (series_lowfrq(cor_series, to_month),series_lowfrq(idx_series, to_month)) }
 }
 
-fn plot_range(s1: &PointIter, s2: &PointIter, duration: &Option<TimeDelta>, w: u32)
+fn plot_range<I: PtIterator>(s1: &I, s2: &I, duration: &Option<Period>, w: u32)
     -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn Error>> 
 {
     let (min1, max1) = s1.iter().map(first).minmax().into_option().ok_or("copper oil date range")?;
     let (min2, max2) = s2.iter().map(first).minmax().into_option().ok_or("index date range")?;
     let x_max = max1.max(max2);
     let x_min = min1.max(min2);
-    let x_min = duration.map(|dt| x_min.max(x_max - dt)).unwrap_or(x_min);
+    let x_min = duration.map(|dt| x_min.max(x_max - TimeDelta::from(dt))).unwrap_or(x_min);
     let x_range = DateRange::new(x_min, x_max, duration.is_some());
 
     let (yl_min, yl_max) = s2.iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("index range")?;
@@ -496,15 +559,19 @@ fn plot_range(s1: &PointIter, s2: &PointIter, duration: &Option<TimeDelta>, w: u
     Ok((s1, s2, x_range, yl_range, yr_range))
 }
 
-fn plot<P: AsRef<std::path::Path>>(file: &P, config: &PlotConfig, duration: &Option<TimeDelta>, s1: &PointIter, s2: &PointIter)
+fn plot<P, C, I>(file: &P, config: &C, duration: &Option<Period>, s1: &I, s2: &I)
     -> Result<(), Box<dyn Error>>
+where
+    C: PlotConfig,
+    P: AsRef<std::path::Path>,
+    I: Header + PtIterator,
 {
-    let t1 = s1.header.as_ref();
-    let t2 = s2.header.as_ref();
+    let t1 = s1.get_header();
+    let t2 = s2.get_header();
     let caption = format!("{t2}与{t1}比较",);
 
     let (s1, s2, x_range, yl_range, yr_range)
-        = plot_range(s1, s2, duration, config.plot_width)?;
+        = plot_range(s1, s2, duration, config.plot_width())?;
     println!("#size of series: {},{}", s1.len(), s2.len());
 
     let root = BitMapBackend::new(&file, config.plot_size()).into_drawing_area();
@@ -512,8 +579,8 @@ fn plot<P: AsRef<std::path::Path>>(file: &P, config: &PlotConfig, duration: &Opt
 
     let mut chart = ChartBuilder::on(&root)
         .caption(&caption, config.title_style())
-        .x_label_area_size(config.x_label_area_size)
-        .y_label_area_size(config.y_label_area_size)
+        .x_label_area_size(config.x_label_area_size())
+        .y_label_area_size(config.y_label_area_size())
         .build_cartesian_2d(x_range.clone(), yl_range)?
         .set_secondary_coord(x_range, yr_range);
 
@@ -549,6 +616,14 @@ where
     x.into_iter().copied().zip(y.into_iter().copied())
 }
 
+trait Header {
+    fn get_header(&self) -> &str;
+}
+
+trait PtIterator {
+    fn iter(&self) -> impl Iterator<Item = SampleData>;
+}
+
 struct PointIter<'a> {
     x: DateColumn<'a>,
     y: F64Column<'a>,
@@ -568,12 +643,20 @@ impl<'a> PointIter<'a> {
     fn with_x(x: DateColumn<'a>)->impl Fn(F64Column<'a>)->PointIter<'a> {
         move |y: F64Column<'a>| PointIter::new(y.header, x, y)
     }
+}
 
+impl<'a> Header for PointIter<'a> {
+    fn get_header(&self) -> &str {
+        &self.header
+    }
+}
+
+impl<'a> PtIterator for PointIter<'a> {
     fn iter(&self) -> impl Iterator<Item = SampleData>
     { zip_copied(&self.x, &self.y).filter(samplefilter) }
 }
 
-type PlotItem<'a> = (usize,(&'a Option<TimeDelta>,&'a PointIter<'a>,&'a PointIter<'a>));
+type PlotItem<'a> = (usize,(&'a Option<Period>,&'a PointIter<'a>,&'a PointIter<'a>));
 
 fn except_index<S: AsRef<str>>(name: S)
     -> impl Fn(&PlotItem) -> bool
@@ -610,12 +693,12 @@ fn multi_y<'a>(data: &'a Vec<DataColumn>)
     Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(PointIter::with_x(x)).collect())
 }
 
-fn plot_data((data, config): (MainData, &PlotConfig))
+fn plot_data((data, config): (MainData, &impl PlotConfig))
     -> Result<(), Box<dyn Error>>
 {
     let copper_oil = multi_x(&data.copper_oil)?;
     let indices = multi_y(&data.indices)?;
-    let shortaxis = vec![None, Some(TimeDelta::days(config.short_period))];
+    let shortaxis = config.period();
 
     let num = indices.len() * copper_oil.len() * shortaxis.len();
     let skip_counter = Cell::new(0_usize);
@@ -623,7 +706,7 @@ fn plot_data((data, config): (MainData, &PlotConfig))
     let plotter = |(n, (duration, s1, s2)): PlotItem| {
         let file = format!("copper_oil_{:02}.png",num - n);
         let print_err = |e: &Box<dyn Error>| eprintln!("plot {file} err {e}!");
-        plot(&file, &config, duration, s1, s2).inspect_err(print_err).ok()
+        plot(&file, config, duration, s1, s2).inspect_err(print_err).ok()
     };
 
     let cnt = 
