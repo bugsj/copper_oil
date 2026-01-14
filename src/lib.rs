@@ -521,16 +521,16 @@ where
 fn to_month(d: &NaiveDate) -> NaiveDate { NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap() }
 fn to_week(d: &NaiveDate) -> NaiveDate { let w = d.iso_week(); NaiveDate::from_isoywd_opt(w.year(), w.week(), Weekday::Mon).unwrap() }
 
-fn series4drawing<I, R>(s1: &I, s2: &I, x_range: &R, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
+fn series4drawing<'a, I, R>(s1: &'a I, s2: &'a I, x_range: &R, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
 where
     R: Ranged<ValueType = NaiveDate>,
-    I: PtIterator,
+    &'a I: IntoIterator<Item = SampleData> + 'a,
 {
     let x_range = x_range.range();
     let x_min = x_range.start;
     let x_duration = (x_range.end - x_range.start).num_days();
-    let cor_series = s1.iter().filter(floor1st(x_min));
-    let idx_series = s2.iter().filter(floor1st(x_min));
+    let cor_series = s1.into_iter().filter(floor1st(x_min));
+    let idx_series = s2.into_iter().filter(floor1st(x_min));
 
     let width = w as i64;
     if      x_duration < width   { (cor_series.collect(), idx_series.collect()) } 
@@ -538,18 +538,20 @@ where
     else                         { (series_lowfrq(cor_series, to_month),series_lowfrq(idx_series, to_month)) }
 }
 
-fn plot_range<I: PtIterator>(s1: &I, s2: &I, duration: &Option<Period>, w: u32)
+fn plot_range<'a, I>(s1: &'a I, s2: &'a I, duration: &Option<Period>, w: u32)
     -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn Error>> 
+where
+    &'a I: IntoIterator<Item = SampleData> + 'a,
 {
-    let (min1, max1) = s1.iter().map(first).minmax().into_option().ok_or("copper oil date range")?;
-    let (min2, max2) = s2.iter().map(first).minmax().into_option().ok_or("index date range")?;
+    let (min1, max1) = s1.into_iter().map(first).minmax().into_option().ok_or("copper oil date range")?;
+    let (min2, max2) = s2.into_iter().map(first).minmax().into_option().ok_or("index date range")?;
     let x_max = max1.max(max2);
     let x_min = min1.max(min2);
     let x_min = duration.map(|dt| x_min.max(x_max - TimeDelta::from(dt))).unwrap_or(x_min);
     let x_range = DateRange::new(x_min, x_max, duration.is_some());
 
-    let (yl_min, yl_max) = s2.iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("index range")?;
-    let (yr_min, yr_max) = s1.iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("copper oil range")?;
+    let (yl_min, yl_max) = s2.into_iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("index range")?;
+    let (yr_min, yr_max) = s1.into_iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("copper oil range")?;
     let yr_max = yr_max.min(COPPER_OIL_RATIO_TOP);
     let yl_range = yl_min * 0.99..yl_max * 1.01;
     let yr_range = yr_min * 0.99..yr_max * 1.01;
@@ -559,12 +561,13 @@ fn plot_range<I: PtIterator>(s1: &I, s2: &I, duration: &Option<Period>, w: u32)
     Ok((s1, s2, x_range, yl_range, yr_range))
 }
 
-fn plot<P, C, I>(file: &P, config: &C, duration: &Option<Period>, s1: &I, s2: &I)
+fn plot<'a, P, C, I>(file: &P, config: &C, duration: &Option<Period>, s1: &'a I, s2: &'a I)
     -> Result<(), Box<dyn Error>>
 where
     C: PlotConfig,
     P: AsRef<std::path::Path>,
-    I: Header + PtIterator,
+    I: Header,
+    &'a I: IntoIterator<Item = SampleData> + 'a,
 {
     let t1 = s1.get_header();
     let t2 = s2.get_header();
@@ -620,10 +623,6 @@ trait Header {
     fn get_header(&self) -> &str;
 }
 
-trait PtIterator {
-    fn iter(&self) -> impl Iterator<Item = SampleData>;
-}
-
 struct PointIter<'a> {
     x: DateColumn<'a>,
     y: F64Column<'a>,
@@ -651,9 +650,13 @@ impl<'a> Header for PointIter<'a> {
     }
 }
 
-impl<'a> PtIterator for PointIter<'a> {
-    fn iter(&self) -> impl Iterator<Item = SampleData>
-    { zip_copied(&self.x, &self.y).filter(samplefilter) }
+impl<'a> IntoIterator for &'a PointIter<'a> {
+    type Item = SampleData;
+    type IntoIter = Box<dyn Iterator<Item = SampleData> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(zip_copied(&self.x, &self.y).filter(samplefilter))
+    }
 }
 
 type PlotItem<'a> = (usize,(&'a Option<Period>,&'a PointIter<'a>,&'a PointIter<'a>));
