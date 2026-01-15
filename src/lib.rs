@@ -131,15 +131,10 @@ impl DataConfig for DataConfigData {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Period {
-    days: NonZero<i64>, 
-}
+type Period = NonZero<i64>;
 
-impl From<Period> for TimeDelta {
-    fn from(value: Period) -> Self {
-        TimeDelta::days(value.days.get())
-    }
+fn period2dt(days: Period) -> TimeDelta {
+    TimeDelta::days(days.get())
 }
 
 trait PlotConfig {
@@ -152,7 +147,6 @@ trait PlotConfig {
     fn legend_style(&self) -> (&str, f64);
     fn plot_size(&self) -> (u32, u32);
     fn plot_width(&self) -> u32;
-    //fn plot_height(&self) -> u32;
     fn line1_stroke_style(&self) -> ShapeStyle;
     fn line2_stroke_style(&self) -> ShapeStyle;
     fn period(&self) -> Vec<Option<Period>>;
@@ -206,10 +200,6 @@ impl PlotConfig for PlotConfigData {
         self.plot_width
     }
 
-    //fn plot_height(&self) -> u32 {
-    //    self.plot_height
-    //}
-
     fn line1_stroke_style(&self) -> ShapeStyle {
         ShapeStyle {
             color: self.line1_color().mix(1.0),
@@ -227,7 +217,7 @@ impl PlotConfig for PlotConfigData {
     }
 
     fn period(&self) -> Vec<Option<Period>> {
-        vec![None, NonZero::new(self.short_period).map(|d| Period {days: d})]
+        vec![None, NonZero::new(self.short_period)]
     }
 }
 
@@ -547,7 +537,7 @@ where
     let (min2, max2) = s2.into_iter().map(first).minmax().into_option().ok_or("index date range")?;
     let x_max = max1.max(max2);
     let x_min = min1.max(min2);
-    let x_min = duration.map(|dt| x_min.max(x_max - TimeDelta::from(dt))).unwrap_or(x_min);
+    let x_min = duration.map(|days| x_min.max(x_max - period2dt(days))).unwrap_or(x_min);
     let x_range = DateRange::new(x_min, x_max, duration.is_some());
 
     let (yl_min, yl_max) = s2.into_iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("index range")?;
@@ -635,13 +625,6 @@ impl<'a> PointIter<'a> {
         assert!(x.len() == y.len(), "x序列与y序列长度不一致");
         PointIter{ x, y, header: header.into() } 
     }
-
-    fn with_y(y: F64Column<'a>)->impl Fn(DateColumn<'a>)->PointIter<'a> 
-    { move |x: DateColumn<'a>| PointIter::new(format!("{}({})",y.header,x.header), x, y) }
-
-    fn with_x(x: DateColumn<'a>)->impl Fn(F64Column<'a>)->PointIter<'a> {
-        move |y: F64Column<'a>| PointIter::new(y.header, x, y)
-    }
 }
 
 impl<'a> Header for PointIter<'a> {
@@ -669,11 +652,6 @@ fn except_index<S: AsRef<str>>(name: S)
     }
 }
 
-// fn except_150long((_, (short, co, index)):&PlotItem) -> bool
-// {
-//     if !short && co.header.ends_with("150天") {false} else {true}
-// }
-
 fn skip_cnt(counter: &Cell<usize> ,f: impl Fn(&PlotItem) -> bool)
     -> impl Fn(&PlotItem) -> bool
 {
@@ -682,25 +660,27 @@ fn skip_cnt(counter: &Cell<usize> ,f: impl Fn(&PlotItem) -> bool)
     }
 }
 
-fn multi_x<'a>(data: &'a Vec<DataColumn>)
-    -> Result<Vec<PointIter<'a>>, Box<dyn Error>>
-{
-    let y = data.last().and_then(DataColumn::to_f64).ok_or("multi_x y incorrect")?;
-    Ok(data.iter().rev().filter_map(DataColumn::to_date).map(PointIter::with_y(y)).collect())
-}
+fn index_header<'a>(_: &str, y: &'a str) -> &'a str { y }
+fn dateshift_header(x: &str, y: &str) -> String { format!("{}({})", y, x) }
 
-fn multi_y<'a>(data: &'a Vec<DataColumn>)
+fn multi_xy<'a, F, H>(data: &'a Vec<DataColumn>, header: F)
     -> Result<Vec<PointIter<'a>>, Box<dyn Error>>
+where
+    F: Fn(&'a str, &'a str) -> H,
+    H: Into<Cow<'a, str>>,
 {
-    let x = data.first().and_then(DataColumn::to_date).ok_or("multi_y x incorrect")?;
-    Ok(data.iter().rev().filter_map(DataColumn::to_f64).map(PointIter::with_x(x)).collect())
+    let result = iproduct!(data.iter().rev().filter_map(DataColumn::to_date),data.iter().rev().filter_map(DataColumn::to_f64))
+        .map(|(x,y)|PointIter::new(header(x.header, y.header), x, y))
+        .collect::<Vec<PointIter>>();
+
+    if result.len() > 0 {Ok(result)} else {Err("main data error".into())}
 }
 
 fn plot_data((data, config): (MainData, &impl PlotConfig))
     -> Result<(), Box<dyn Error>>
 {
-    let copper_oil = multi_x(&data.copper_oil)?;
-    let indices = multi_y(&data.indices)?;
+    let copper_oil = multi_xy(&data.copper_oil, dateshift_header)?;
+    let indices = multi_xy(&data.indices, index_header)?;
     let shortaxis = config.period();
 
     let num = indices.len() * copper_oil.len() * shortaxis.len();
