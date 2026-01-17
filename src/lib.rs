@@ -644,8 +644,7 @@ impl<'a> IntoIterator for &'a PointIter<'a> {
 
 type PlotItem<'a> = (usize,(&'a Option<Period>,&'a PointIter<'a>,&'a PointIter<'a>));
 
-fn except_index<S: AsRef<str>>(name: S)
-    -> impl Fn(&PlotItem) -> bool
+fn except_index<S: AsRef<str>>(name: S) -> impl Fn(&PlotItem) -> bool
 {
     move |(_, (_, _, s2)): &PlotItem| {
         s2.header != name.as_ref()
