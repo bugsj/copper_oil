@@ -285,17 +285,17 @@ impl DataColumn {
     }
 
     fn push<S: AsRef<str>>(&mut self, item: &mut impl Iterator<Item = S>) -> Option<()> {
-        let to_f64 = |s: Option<S>| s.and_then(|f| f.as_ref().parse::<f64>().ok());
-        let to_date  = |s: Option<S>| s.and_then(|d| NaiveDate::parse_from_str(d.as_ref(), "%Y/%m/%d").ok());
+        let to_f64 = |f: S| f.as_ref().parse::<f64>().ok();
+        let to_date  = |d: S| NaiveDate::parse_from_str(d.as_ref(), "%Y/%m/%d").ok();
 
         let item = item.next();
         match &mut self.data {
             AnyData::F64(f) => {
-                f.push(to_f64(item).unwrap_or_default()); Some(())
+                f.push(item.and_then(to_f64).unwrap_or_default()); Some(())
             }
             AnyData::DATE(d) => {
                 let push_to_dates = |i| d.push(i);
-                to_date(item).map(push_to_dates)
+                item.and_then(to_date).map(push_to_dates)
             }
         }
     }
