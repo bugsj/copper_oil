@@ -362,25 +362,25 @@ fn read_data<P: AsRef<std::path::Path>>(input_file: &P)
     let file = std::fs::File::open(&input_file)?;
     let lines = std::io::BufReader::new(file).lines();
 
-    let mut data_columns: Vec<DataColumn> = Vec::with_capacity(6);
+    let mut indices: Vec<DataColumn> = Vec::with_capacity(6);
 
     lines.map(|l| l.expect("read file error!")).for_each(|line| {
         let mut item = line.split(",");
-        if !data_columns.is_empty() {
+        if !indices.is_empty() {
             let push_item_into = |v: &mut DataColumn| v.push(&mut item);
-            data_columns.iter_mut().map_while(push_item_into).count();
+            indices.iter_mut().map_while(push_item_into).count();
         } else {
-            data_columns.extend(item.map(DataColumn::newf64));
-            data_columns[0].newdate();
+            indices.extend(item.map(DataColumn::newf64));
+            indices[0].newdate();
         }
     });
 
-    if data_columns.len() > 3 {
-        println!("#input item cnt: {}", data_columns.len());
-        println!("#input item0 size: {}", data_columns[0].as_date_ref().unwrap().len());
-        println!("#input itemE size: {}", data_columns.last().unwrap().as_f64_ref().unwrap().len());
-        let copper_oil = data_columns.drain(1..=2).collect();
-        Ok(MainData {copper_oil, indices: data_columns})
+    if indices.len() > 3 {
+        println!("#input item cnt: {}", indices.len());
+        println!("#input item0 size: {}", indices[0].as_date_ref().unwrap().len());
+        println!("#input itemE size: {}", indices.last().unwrap().as_f64_ref().unwrap().len());
+        let copper_oil = indices.drain(1..=2).collect();
+        Ok(MainData {copper_oil, indices})
     } else { 
         Err("too few items".into())
     }
@@ -398,7 +398,7 @@ fn process_data((data, config): (MainData, &impl DataConfig))
     let oil = copper_oil.first().and_then(DataColumn::to_f64).ok_or("oil incorrect")?;
     let copper_oil = DataColumn::fromf64("铜油比", zip_copied(&copper,&oil).map(to_ratio).collect());
     
-    let timedeltas = &config.date_shift();
+    let timedeltas = config.date_shift();
 
     let date_shift = |dt: u64| move |d: &NaiveDate| d.checked_add_days(Days::new(dt));
     let dates_shift = |dt| 
@@ -455,15 +455,11 @@ impl Ranged for DateRange {
             let too_few_points = |n: &u32| *n * max_num > months_cnt;
             let labelduration = [1u32, 2, 3, 4, 6].iter().copied().filter(too_few_points).min().expect("too many sample");
 
-            let remain = (self.start.month() - 1) % labelduration;
-            let start_date = if remain == 0 {self.start} else {self.start + Months::new(labelduration - remain)};
-
-            let start_month = to_month(&start_date);
-            let start_month = if start_month < self.start { start_month + Months::new(labelduration) } else { start_month };
+            let start_date = y2date(start_year - 1).expect("cannot?");
             let end_month = y2date(end_year).expect("end year error?!");
 
-            let nth_point = |n: u32| start_month + Months::new(labelduration * n);
-            return (0..months_cnt).map(nth_point).filter(ceiling(end_month)).collect();
+            let nth_point = |n: u32| start_date + Months::new(labelduration * n);
+            return (0..months_cnt+12).map(nth_point).filter(floor(start_date)).filter(ceiling(end_month)).collect();
         } else {
             let step = years_cnt.div(max_num) as usize + 1_usize;
             return (start_year..end_year).step_by(step).filter_map(y2date).collect();
@@ -482,6 +478,7 @@ fn second<T,U>(x: (T, U)) -> U { x.1 }
 fn accumulator<T: Add,U: Add>(x: (T, U), y: (T, U)) -> (T::Output, U::Output) {(x.0 + y.0, x.1 + y.1)}
 fn to_ratio<T, U>(x: (T, U)) -> T::Output where T: Div<U> { x.0 / x.1 }
 
+fn floor<T:PartialOrd>(min: T) -> impl Fn(&T) -> bool { move |x| *x >= min}
 fn ceiling<T:PartialOrd>(max: T) -> impl Fn(&T) -> bool { move |x| *x <= max}
 fn floor1st<T:PartialOrd, U>(min: T) -> impl Fn(&(T, U)) -> bool { move |x| x.0 >= min }
 fn map1st<T,U,M>(f: impl Fn(&T) -> M) -> impl Fn(&(T, U)) -> M { move |x| f(&x.0) }
@@ -528,7 +525,7 @@ where
     else                         { (series_lowfrq(cor_series, to_month),series_lowfrq(idx_series, to_month)) }
 }
 
-fn plot_range<'a, I>(s1: &'a I, s2: &'a I, duration: &Option<Period>, w: u32)
+fn plot_range<'a, I>(s1: &'a I, s2: &'a I, duration: Option<Period>, w: u32)
     -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn Error>> 
 where
     &'a I: IntoIterator<Item = SampleData> + 'a,
@@ -551,7 +548,7 @@ where
     Ok((s1, s2, x_range, yl_range, yr_range))
 }
 
-fn plot<'a, P, C, I>(file: &P, config: &C, duration: &Option<Period>, s1: &'a I, s2: &'a I)
+fn plot<'a, P, C, I>(file: &P, config: &C, duration: Option<Period>, s1: &'a I, s2: &'a I)
     -> Result<(), Box<dyn Error>>
 where
     C: PlotConfig,
@@ -642,7 +639,7 @@ impl<'a> IntoIterator for &'a PointIter<'a> {
     }
 }
 
-type PlotItem<'a> = (usize,(&'a Option<Period>,&'a PointIter<'a>,&'a PointIter<'a>));
+type PlotItem<'a> = (usize,(Option<Period>,&'a PointIter<'a>,&'a PointIter<'a>));
 
 fn except_index<S: AsRef<str>>(name: S) -> impl Fn(&PlotItem) -> bool
 {
@@ -692,7 +689,7 @@ fn plot_data((data, config): (MainData, &impl PlotConfig))
     };
 
     let cnt = 
-    iproduct!(shortaxis.iter(), copper_oil.iter(), indices.iter())
+    iproduct!(shortaxis.iter().copied(), copper_oil.iter(), indices.iter())
         .enumerate()
         .filter(skip_cnt(&skip_counter, except_index("恒生指数")))
         .filter_map(plotter).count();
