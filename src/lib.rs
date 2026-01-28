@@ -27,9 +27,9 @@ use chrono::{Datelike, Months, NaiveDate, Days, Weekday, TimeDelta};
 use itertools::{Itertools, iproduct};
 use std::error::Error;
 
-use plotters::prelude::*;
-use plotters::coord::ranged1d::{DefaultFormatting, KeyPointHint, Ranged};
+use plotters::coord::ranged1d::{ValueFormatter, NoDefaultFormatting, KeyPointHint, Ranged};
 use plotters::style::ShapeStyle;
+use plotters::prelude::*;
 
 use serde::{Serialize, Deserialize};
 use serde_json;
@@ -430,7 +430,7 @@ impl DateRange {
 
 impl Ranged for DateRange {
     type ValueType = NaiveDate;
-    type FormatOption = DefaultFormatting;
+    type FormatOption = NoDefaultFormatting;
 
     fn map(&self, v: &NaiveDate, pixel_range: (i32, i32)) -> i32 {
        let range_size = self.end - self.start;
@@ -471,6 +471,18 @@ impl Ranged for DateRange {
     }
 }
 
+impl ValueFormatter<NaiveDate> for DateRange {
+    fn format(value: &NaiveDate) -> String {
+        if value.month() == 1 {format!("{:0}年", value.year())} else {format!("{:0}月", value.month())}
+    }
+
+    fn format_ext(&self, value: &NaiveDate) -> String {
+        Self::format(value)
+    }
+}
+
+fn integer_fmt<T: std::fmt::Display>(v: &T) -> String { format!("{v:0}") }
+
 type SampleData = (NaiveDate, f64);
 
 fn first<T,U>(x: (T, U)) -> T { x.0 }
@@ -494,10 +506,11 @@ where
     iter.map(|x| (x, 1.0)).reduce(accumulator).map(to_ratio)
 }
 
-fn series_lowfrq<I,F>(series: I, to:F) -> Vec<SampleData> 
+fn series_lowfrq<I,F,D>(series: I, to:F) -> Vec<(D,f64)> 
 where
-    I: Iterator<Item = SampleData>,
-    F: Fn(&NaiveDate) -> NaiveDate,
+    I: Iterator<Item = (D,f64)>,
+    F: Fn(&D) -> D,
+    D: PartialEq,
 {
     series.filter(samplefilter)
         .chunk_by(map1st(to)).into_iter()
@@ -579,9 +592,8 @@ where
 
     chart.configure_mesh()
         .x_label_style(config.label_style())
-        .x_label_formatter(&|x| if x.month() == 1 { format!("{:0}年", x.year()) } else { format!("{:0}月", x.month()) } )
         .y_label_style(config.label_style())
-        .y_label_formatter(&|y| format!("{:0}", y))
+        .y_label_formatter(&integer_fmt)
         .draw()?;
 
     chart.draw_secondary_series(LineSeries::new(s1,config.line1_stroke_style()))?
@@ -657,7 +669,7 @@ fn skip_cnt(counter: &Cell<usize> ,f: impl Fn(&PlotItem) -> bool)
 }
 
 fn index_header<'a>(_: &str, y: &'a str) -> &'a str { y }
-fn dateshift_header(x: &str, y: &str) -> String { format!("{}({})", y, x) }
+fn dateshift_header(x: &str, y: &str) -> String { format!("{y}({x})") }
 
 fn multi_xy<'a, F, H>(data: &'a Vec<DataColumn>, header: F)
     -> Result<Vec<PointIter<'a>>, Box<dyn Error>>
