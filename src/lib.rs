@@ -23,7 +23,7 @@
  */
 
 use std::{borrow::Cow, cell::{Cell, LazyCell, OnceCell}, io::BufRead, num::NonZero, ops::{Add, Deref, Div, Range}};
-use chrono::{Datelike, Months, NaiveDate, Days, Weekday, TimeDelta};
+use chrono::{Datelike, NaiveDate, Days, TimeDelta};
 use itertools::{Itertools, iproduct};
 use std::error::Error;
 
@@ -238,6 +238,24 @@ impl std::convert::From<Vec<NaiveDate>> for AnyData {
     }
 }
 
+enum AnyNum {
+    F64(f64),
+    DATE(NaiveDate),
+}
+
+impl std::convert::From<f64> for AnyNum {
+    fn from(value: f64) -> Self {
+        AnyNum::F64(value)
+    }
+}
+
+impl std::convert::From<NaiveDate> for AnyNum {
+    fn from(value: NaiveDate) -> Self {
+        AnyNum::DATE(value)
+    }
+}
+
+
 struct DataColumn {
     header: String,
     data: AnyData,
@@ -268,17 +286,17 @@ impl DataColumn {
         self.data = AnyData::DATE(vec![]);
     }
 
-    fn as_f64_ref(&'_ self) -> Option<F64Column<'_>> {
+    fn as_f64_ref(&'_ self) -> Option<TypeColumn<'_, f64>> {
         if let AnyData::F64(f) = &self.data {
-            Some(F64Column { header: &self.header, data: f })
+            Some(TypeColumn::<f64>{ header: &self.header, data: f })
         } else {
             None
         }
     }
 
-    fn as_date_ref(&'_ self) -> Option<DateColumn<'_>> {
+    fn as_date_ref(&'_ self) -> Option<TypeColumn<'_, NaiveDate>> {
         if let AnyData::DATE(d) = &self.data {
-            Some(DateColumn { header: &self.header, data: d })
+            Some(TypeColumn::<NaiveDate>{ header: &self.header, data: d })
         } else {
             None
         }
@@ -300,51 +318,28 @@ impl DataColumn {
         }
     }
 
-    fn to_date(c: &'_ DataColumn) -> Option<DateColumn<'_>> { c.as_date_ref()  }
-    fn to_f64(c: &'_ DataColumn) -> Option<F64Column<'_>> { c.as_f64_ref() }
+    fn to_date(c: &'_ DataColumn) -> Option<TypeColumn<'_, NaiveDate>> { c.as_date_ref()  }
+    fn to_f64(c: &'_ DataColumn) -> Option<TypeColumn<'_, f64>> { c.as_f64_ref() }
 }
 
 
 #[derive(Clone, Copy)]
-struct F64Column<'a> {
+struct TypeColumn<'a, T> {
     header: &'a str,
-    data: &'a Vec<f64>,
+    data: &'a Vec<T>,
 }
 
-#[derive(Clone, Copy)]
-struct DateColumn<'a> {
-    header: &'a str,
-    data: &'a Vec<NaiveDate>,
-}
-
-impl<'a> IntoIterator for &'a F64Column<'a> {
-    type Item = &'a f64;
-    type IntoIter = std::slice::Iter<'a, f64>;
+impl<'a, T> IntoIterator for &'a TypeColumn<'a, T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.data.into_iter()
     }
 }
 
-impl<'a> Deref for F64Column<'a> {
-    type Target = Vec<f64>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-impl<'a> IntoIterator for &'a DateColumn<'a> {
-    type Item = &'a NaiveDate;
-    type IntoIter = std::slice::Iter<'a, NaiveDate>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.data.into_iter()
-    }
-}
-
-impl<'a> Deref for DateColumn<'a> {
-    type Target = Vec<NaiveDate>;
+impl<'a, T> Deref for TypeColumn<'a, T> {
+    type Target = Vec<T>;
 
     fn deref(&self) -> &Self::Target {
         &self.data
@@ -412,14 +407,14 @@ fn process_data((data, config): (MainData, &impl DataConfig))
 }
 
 #[derive(Clone)]
-struct DateRange {
-    start: NaiveDate,
-    end: NaiveDate,
+struct DateRange<D: Datelike + PartialOrd + Copy> {
+    start: D,
+    end: D,
     short: bool,
 }
 
-impl DateRange {
-    pub fn new(start_date:NaiveDate, end_date:NaiveDate, short_range:bool) -> DateRange {
+impl<D: Datelike + PartialOrd + Copy> DateRange<D> {
+    pub fn new(start_date:D, end_date:D, short_range:bool) -> DateRange<D> {
         if start_date < end_date {
             DateRange { start: start_date, end: end_date, short: short_range }
         } else {
@@ -428,55 +423,59 @@ impl DateRange {
     }
 }
 
-impl Ranged for DateRange {
-    type ValueType = NaiveDate;
+impl<D: Datelike + PartialOrd + Copy> Ranged for DateRange<D> {
+    type ValueType = D;
     type FormatOption = NoDefaultFormatting;
 
-    fn map(&self, v: &NaiveDate, pixel_range: (i32, i32)) -> i32 {
-       let range_size = self.end - self.start;
-       let dis = *v - self.start;
-       let v = dis.num_days() as f64 / range_size.num_days() as f64;
+    fn map(&self, v: &D, pixel_range: (i32, i32)) -> i32 {
+       let range_size = self.end.num_days_from_ce() - self.start.num_days_from_ce();
+       let dis = v.num_days_from_ce() - self.start.num_days_from_ce();
+       let v = dis as f64 / range_size as f64;
        let size = pixel_range.1 - pixel_range.0;
 
        ((size as f64) * v).round() as i32 + pixel_range.0
     }
 
-    fn key_points<Hint:KeyPointHint>(&self, hint: Hint) -> Vec<NaiveDate> {
+    fn key_points<Hint:KeyPointHint>(&self, hint: Hint) -> Vec<D> {
+        let start_date = self.start.with_day(1).and_then(|d| d.with_month(1)).unwrap();
         let start_year = self.start.year() + 1;
         let end_year = self.end.year() + 1;
         let years_cnt = (end_year - start_year).unsigned_abs() + 1;
-        let months_cnt = (self.end -self.start).num_days().unsigned_abs() as u32 / 30 + 1;
+        let months_cnt = (self.end.num_days_from_ce() - self.start.num_days_from_ce()).unsigned_abs() as u32 / 30 + 1;
         let max_num: u32 = hint.max_num_points().try_into().unwrap_or(u32::MAX);
         if max_num < 3 || years_cnt < 1 { return vec![]; } 
 
-        let y2date = | y:i32 | NaiveDate::from_ymd_opt(y, 1, 1);
+        let y2date = | y:i32 | start_date.with_year(y);
 
         if self.short && 6 * max_num > months_cnt {
             let too_few_points = |n: &u32| *n * max_num > months_cnt;
             let labelduration = [1u32, 2, 3, 4, 6].iter().copied().filter(too_few_points).min().expect("too many sample");
 
-            let start_date = y2date(start_year - 1).expect("cannot?");
-            let end_month = y2date(end_year).expect("end year error?!");
+            let end_month = start_date.with_year(end_year).expect("end year error?!");
 
-            let nth_point = |n: u32| start_date + Months::new(labelduration * n);
-            return (0..months_cnt+12).map(nth_point).filter(floor(start_date)).filter(ceiling(end_month)).collect();
+            let nth_point = |n: u32| {
+                let n = labelduration * n;
+                let (dy, dm) = (n / 12, n % 12);
+                start_date.with_year(start_date.year() + dy as i32).and_then(|y| y.with_month0(dm))
+            };
+            return (0..months_cnt+12).filter_map(nth_point).filter(floor(self.start)).filter(ceiling(end_month)).collect();
         } else {
             let step = years_cnt.div(max_num) as usize + 1_usize;
             return (start_year..end_year).step_by(step).filter_map(y2date).collect();
         }
     }
 
-    fn range(&self) -> Range<NaiveDate> {
+    fn range(&self) -> Range<D> {
         self.start .. self.end
     }
 }
 
-impl ValueFormatter<NaiveDate> for DateRange {
-    fn format(value: &NaiveDate) -> String {
+impl<D: Datelike + PartialOrd + Copy> ValueFormatter<D> for DateRange<D> {
+    fn format(value: &D) -> String {
         if value.month() == 1 {format!("{:0}年", value.year())} else {format!("{:0}月", value.month())}
     }
 
-    fn format_ext(&self, value: &NaiveDate) -> String {
+    fn format_ext(&self, value: &D) -> String {
         Self::format(value)
     }
 }
@@ -495,8 +494,8 @@ fn ceiling<T:PartialOrd>(max: T) -> impl Fn(&T) -> bool { move |x| *x <= max}
 fn floor1st<T:PartialOrd, U>(min: T) -> impl Fn(&(T, U)) -> bool { move |x| x.0 >= min }
 fn map1st<T,U,M>(f: impl Fn(&T) -> M) -> impl Fn(&(T, U)) -> M { move |x| f(&x.0) }
 
-fn normalfilter(s: &f64) -> bool { s.is_normal() && *s > 0.0 }
-fn samplefilter<T>(s: &(T, f64)) -> bool { normalfilter(&s.1) }
+fn normalfilter<U: Into<AnyNum> + Copy>(s: &U) -> bool { match (*s).into() { AnyNum::F64(s) => s.is_normal() && s > 0.0, _ => true} }
+fn samplefilter<T, U: Into<AnyNum> + Copy>(s: &(T, U)) -> bool { normalfilter(&s.1) }
 
 fn avg<I, T>(iter: I) -> Option<T>
 where
@@ -518,8 +517,8 @@ where
         .collect()
 }
 
-fn to_month(d: &NaiveDate) -> NaiveDate { NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap() }
-fn to_week(d: &NaiveDate) -> NaiveDate { let w = d.iso_week(); NaiveDate::from_isoywd_opt(w.year(), w.week(), Weekday::Mon).unwrap() }
+fn to_month<D: Datelike>(d: &D) -> D { d.with_day(1).unwrap() }
+fn to_week<D: Datelike>(d: &D) -> D { let w = d.weekday().num_days_from_monday(); d.with_ordinal0(d.ordinal0().checked_sub(w).unwrap_or(0)).unwrap() }
 
 fn series4drawing<'a, I, R>(s1: &'a I, s2: &'a I, x_range: &R, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
 where
@@ -539,7 +538,7 @@ where
 }
 
 fn plot_range<'a, I>(s1: &'a I, s2: &'a I, duration: Option<Period>, w: u32)
-    -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange, Range<f64>, Range<f64>), Box<dyn Error>> 
+    -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange<NaiveDate>, Range<f64>, Range<f64>), Box<dyn Error>> 
 where
     &'a I: IntoIterator<Item = SampleData> + 'a,
 {
@@ -622,36 +621,36 @@ trait Header {
     fn get_header(&self) -> &str;
 }
 
-struct PointIter<'a> {
-    x: DateColumn<'a>,
-    y: F64Column<'a>,
+struct PointIter<'a, X: Copy, Y: Into<AnyNum> + Copy> {
+    x: TypeColumn<'a, X>,
+    y: TypeColumn<'a, Y>,
     header: Cow<'a, str>,
 }
 
-impl<'a> PointIter<'a> {
-    fn new<S: Into<Cow<'a, str>>>(header: S, x: DateColumn<'a>, y: F64Column<'a>)->PointIter<'a> 
+impl<'a, X: Copy, Y: Into<AnyNum> + Copy> PointIter<'a, X, Y> {
+    fn new<S: Into<Cow<'a, str>>>(header: S, x: TypeColumn<'a, X>, y: TypeColumn<'a, Y>)->PointIter<'a, X, Y> 
     {
         assert!(x.len() == y.len(), "x序列与y序列长度不一致");
         PointIter{ x, y, header: header.into() } 
     }
 }
 
-impl<'a> Header for PointIter<'a> {
+impl<'a, X: Copy, Y: Into<AnyNum> + Copy> Header for PointIter<'a, X, Y> {
     fn get_header(&self) -> &str {
         &self.header
     }
 }
 
-impl<'a> IntoIterator for &'a PointIter<'a> {
-    type Item = SampleData;
-    type IntoIter = Box<dyn Iterator<Item = SampleData> + 'a>;
+impl<'a, X: Copy, Y: Into<AnyNum> + Copy> IntoIterator for &'a PointIter<'a, X, Y> {
+    type Item = (X, Y);
+    type IntoIter = Box<dyn Iterator<Item = (X, Y)> + 'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         Box::new(zip_copied(&self.x, &self.y).filter(samplefilter))
     }
 }
 
-type PlotItem<'a> = (usize,(Option<Period>,&'a PointIter<'a>,&'a PointIter<'a>));
+type PlotItem<'a> = (usize,(Option<Period>,&'a PointIter<'a, NaiveDate, f64>,&'a PointIter<'a, NaiveDate, f64>));
 
 fn except_index<S: AsRef<str>>(name: S) -> impl Fn(&PlotItem) -> bool
 {
@@ -672,14 +671,14 @@ fn index_header<'a>(_: &str, y: &'a str) -> &'a str { y }
 fn dateshift_header(x: &str, y: &str) -> String { format!("{y}({x})") }
 
 fn multi_xy<'a, F, H>(data: &'a Vec<DataColumn>, header: F)
-    -> Result<Vec<PointIter<'a>>, Box<dyn Error>>
+    -> Result<Vec<PointIter<'a, NaiveDate, f64>>, Box<dyn Error>>
 where
     F: Fn(&'a str, &'a str) -> H,
     H: Into<Cow<'a, str>>,
 {
     let result = iproduct!(data.iter().rev().filter_map(DataColumn::to_date),data.iter().rev().filter_map(DataColumn::to_f64))
         .map(|(x,y)|PointIter::new(header(x.header, y.header), x, y))
-        .collect::<Vec<PointIter>>();
+        .collect::<Vec<PointIter<NaiveDate, f64>>>();
 
     if result.len() > 0 {Ok(result)} else {Err("main data error".into())}
 }
@@ -716,7 +715,7 @@ fn load_conf_file<P: AsRef<std::path::Path>>(path: P) -> Option<Config> {
     std::fs::read_to_string(path).ok().and_then(json2conf)
 }
 
-fn with_conf<'a, D, C>(conf: &'a C) -> impl Fn(D) -> (D, &'a C) {
+fn with<'a, D, C>(conf: &'a C) -> impl Fn(D) -> (D, &'a C) {
     move |data: D| (data, conf)
 }
 
@@ -733,8 +732,8 @@ pub fn read_and_plot_data(mut args: impl Iterator<Item = String>)
 
     data_path.as_ref().ok_or("too few argument".into())
         .and_then(read_data)
-        .map(with_conf(&conf.data_conf))
+        .map(with(&conf.data_conf))
         .and_then(process_data)
-        .map(with_conf(&conf.plot_conf))
+        .map(with(&conf.plot_conf))
         .and_then(plot_data)
 }
