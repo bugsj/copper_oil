@@ -16,6 +16,7 @@
         "line1_color_str": "RED",
         "line2_color_str": "BLUE",
         "stroke_size": 1,
-        "short_period": 1095
+        "copper_oil_top": 210.0,
+        "short_period": 2
     }
 }

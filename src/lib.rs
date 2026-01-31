@@ -23,7 +23,7 @@
  */
 
 use std::{borrow::Cow, cell::{Cell, LazyCell, OnceCell}, io::BufRead, num::NonZero, ops::{Add, Deref, Div, Range}};
-use chrono::{Datelike, NaiveDate, Days, TimeDelta};
+use chrono::{Datelike, NaiveDate, Days};
 use itertools::{Itertools, iproduct};
 use std::error::Error;
 
@@ -33,8 +33,6 @@ use plotters::prelude::*;
 
 use serde::{Serialize, Deserialize};
 use serde_json;
-
-const COPPER_OIL_RATIO_TOP:f64 = 205.0;
 
 #[derive(Serialize, Deserialize)]
 struct PlotConfigData {
@@ -62,7 +60,8 @@ struct PlotConfigData {
     line2_color: OnceCell<RGBColor>,
 
     stroke_size: u32,
-    short_period: i64,
+    copper_oil_top: f64,
+    short_period: i32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,8 +101,8 @@ impl Default for Config {
                 line2_color: OnceCell::new(),
 
                 stroke_size: 1,
-
-                short_period: 1095,
+                copper_oil_top: 205.0,
+                short_period: 2,
             },
             data_conf: DataConfigData {
                 date_shift: vec![90, 150]
@@ -131,11 +130,7 @@ impl DataConfig for DataConfigData {
     }
 }
 
-type Period = NonZero<i64>;
-
-fn period2dt(days: Period) -> TimeDelta {
-    TimeDelta::days(days.get())
-}
+type Period = NonZero<i32>;
 
 trait PlotConfig {
     fn x_label_area_size(&self) -> i32;
@@ -149,6 +144,7 @@ trait PlotConfig {
     fn plot_width(&self) -> u32;
     fn line1_stroke_style(&self) -> ShapeStyle;
     fn line2_stroke_style(&self) -> ShapeStyle;
+    fn copper_oil_top(&self) -> Option<f64>;
     fn period(&self) -> Vec<Option<Period>>;
 }
 
@@ -216,6 +212,10 @@ impl PlotConfig for PlotConfigData {
         }
     }
 
+    fn copper_oil_top(&self) -> Option<f64> {
+        self.copper_oil_top.into()
+    }
+
     fn period(&self) -> Vec<Option<Period>> {
         vec![None, NonZero::new(self.short_period)]
     }
@@ -240,7 +240,6 @@ impl std::convert::From<Vec<NaiveDate>> for AnyData {
 
 enum AnyNum {
     F64(f64),
-    DATE(NaiveDate),
 }
 
 impl std::convert::From<f64> for AnyNum {
@@ -248,13 +247,6 @@ impl std::convert::From<f64> for AnyNum {
         AnyNum::F64(value)
     }
 }
-
-impl std::convert::From<NaiveDate> for AnyNum {
-    fn from(value: NaiveDate) -> Self {
-        AnyNum::DATE(value)
-    }
-}
-
 
 struct DataColumn {
     header: String,
@@ -494,7 +486,7 @@ fn ceiling<T:PartialOrd>(max: T) -> impl Fn(&T) -> bool { move |x| *x <= max}
 fn floor1st<T:PartialOrd, U>(min: T) -> impl Fn(&(T, U)) -> bool { move |x| x.0 >= min }
 fn map1st<T,U,M>(f: impl Fn(&T) -> M) -> impl Fn(&(T, U)) -> M { move |x| f(&x.0) }
 
-fn normalfilter<U: Into<AnyNum> + Copy>(s: &U) -> bool { match (*s).into() { AnyNum::F64(s) => s.is_normal() && s > 0.0, _ => true} }
+fn normalfilter<U: Into<AnyNum> + Copy>(s: &U) -> bool { match (*s).into() { AnyNum::F64(s) => s.is_normal() && s > 0.0 } }
 fn samplefilter<T, U: Into<AnyNum> + Copy>(s: &(T, U)) -> bool { normalfilter(&s.1) }
 
 fn avg<I, T>(iter: I) -> Option<T>
@@ -505,11 +497,12 @@ where
     iter.map(|x| (x, 1.0)).reduce(accumulator).map(to_ratio)
 }
 
-fn series_lowfrq<I,F,D>(series: I, to:F) -> Vec<(D,f64)> 
+fn series_lowfrq<I,F,D,T>(series: I, to:F) -> Vec<(D,T)> 
 where
-    I: Iterator<Item = (D,f64)>,
+    I: Iterator<Item = (D,T)>,
     F: Fn(&D) -> D,
     D: PartialEq,
+    T: Into<AnyNum> + Add<Output = T> + Div<f64, Output = T> + Copy,
 {
     series.filter(samplefilter)
         .chunk_by(map1st(to)).into_iter()
@@ -520,40 +513,45 @@ where
 fn to_month<D: Datelike>(d: &D) -> D { d.with_day(1).unwrap() }
 fn to_week<D: Datelike>(d: &D) -> D { let w = d.weekday().num_days_from_monday(); d.with_ordinal0(d.ordinal0().checked_sub(w).unwrap_or(0)).unwrap() }
 
-fn series4drawing<'a, I, R>(s1: &'a I, s2: &'a I, x_range: &R, w: u32) -> (Vec<SampleData>,Vec<SampleData>)
+fn series4drawing<'a, I, R, X, Y>(s1: &'a I, s2: &'a I, x_range: &R, w: u32) -> (Vec<(X,Y)>,Vec<(X,Y)>)
 where
-    R: Ranged<ValueType = NaiveDate>,
-    &'a I: IntoIterator<Item = SampleData> + 'a,
+    R: Ranged<ValueType = X>,
+    &'a I: IntoIterator<Item = (X,Y)> + 'a,
+    X: Datelike + PartialOrd + Copy,
+    Y: Into<AnyNum> + Add<Output = Y> + Div<f64, Output = Y> + Copy,
 {
     let x_range = x_range.range();
     let x_min = x_range.start;
-    let x_duration = (x_range.end - x_range.start).num_days();
+    let x_duration = x_range.end.num_days_from_ce() - x_range.start.num_days_from_ce();
     let cor_series = s1.into_iter().filter(floor1st(x_min));
     let idx_series = s2.into_iter().filter(floor1st(x_min));
 
-    let width = w as i64;
+    let width = w as i32;
     if      x_duration < width   { (cor_series.collect(), idx_series.collect()) } 
     else if x_duration < width*7 { (series_lowfrq(cor_series, to_week),series_lowfrq(idx_series, to_week)) } 
     else                         { (series_lowfrq(cor_series, to_month),series_lowfrq(idx_series, to_month)) }
 }
 
-fn plot_range<'a, I>(s1: &'a I, s2: &'a I, duration: Option<Period>, w: u32)
-    -> Result<(Vec<SampleData>, Vec<SampleData>, DateRange<NaiveDate>, Range<f64>, Range<f64>), Box<dyn Error>> 
+fn plot_range<'a, I, X, Y>(s1: &'a I, s2: &'a I, duration: Option<Period>, yr_top: Option<Y>, w: u32)
+    -> Result<(Vec<(X,Y)>, Vec<(X,Y)>, DateRange<X>, Range<Y>, Range<Y>), Box<dyn Error>> 
 where
-    &'a I: IntoIterator<Item = SampleData> + 'a,
+    &'a I: IntoIterator<Item = (X,Y)> + 'a,
+    X: Datelike + PartialOrd + Copy,
+    Y: Into<AnyNum> + Add<Output = Y> + Div<f64, Output = Y> + PartialOrd + Copy,
 {
     let (min1, max1) = s1.into_iter().map(first).minmax().into_option().ok_or("copper oil date range")?;
     let (min2, max2) = s2.into_iter().map(first).minmax().into_option().ok_or("index date range")?;
-    let x_max = max1.max(max2);
-    let x_min = min1.max(min2);
-    let x_min = duration.map(|days| x_min.max(x_max - period2dt(days))).unwrap_or(x_min);
+    let x_max = if max1 > max2 {max1} else {max2};
+    let x_min = if min1 > min2 {min1} else {min2};
+    let x_min = duration.and_then(|dy| x_max.with_year(x_max.year() - dy.get()))
+        .and_then(|x_start| (x_min < x_start).then_some(x_start)).unwrap_or(x_min);
     let x_range = DateRange::new(x_min, x_max, duration.is_some());
 
     let (yl_min, yl_max) = s2.into_iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("index range")?;
     let (yr_min, yr_max) = s1.into_iter().filter(floor1st(x_min)).map(second).minmax().into_option().ok_or("copper oil range")?;
-    let yr_max = yr_max.min(COPPER_OIL_RATIO_TOP);
-    let yl_range = yl_min * 0.99..yl_max * 1.01;
-    let yr_range = yr_min * 0.99..yr_max * 1.01;
+    let yr_max = yr_top.and_then(|yr_top| (yr_max > yr_top).then_some(yr_top)).unwrap_or(yr_max);
+    let yl_range = yl_min / 1.01..yl_max / 0.99;
+    let yr_range = yr_min / 1.01..yr_max / 0.99;
 
     let (s1, s2) = series4drawing(s1, s2, &x_range, w);
 
@@ -573,7 +571,7 @@ where
     let caption = format!("{t2}与{t1}比较",);
 
     let (s1, s2, x_range, yl_range, yr_range)
-        = plot_range(s1, s2, duration, config.plot_width())?;
+        = plot_range(s1, s2, duration, config.copper_oil_top(),config.plot_width())?;
     println!("#size of series: {},{}", s1.len(), s2.len());
 
     let root = BitMapBackend::new(&file, config.plot_size()).into_drawing_area();
