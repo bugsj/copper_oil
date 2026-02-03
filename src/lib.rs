@@ -38,7 +38,11 @@ use serde_json;
 struct PlotConfigData {
     plot_width: u32,
     plot_height: u32,
-    
+    bg_color_str: String,
+
+    #[serde(skip)]
+    bg_color: OnceCell<RGBColor>,
+
     title_font: String,
     title_size: f64,
 
@@ -50,6 +54,15 @@ struct PlotConfigData {
 
     legend_font: String,
     legend_size: f64,
+    legend_rectangle: [i32; 4],
+    legend_rect_bd_str: String,
+    legend_rect_bg_str: String,
+
+    #[serde(skip)]
+    legend_rect_bd: OnceCell<RGBColor>,
+    #[serde(skip)]
+    legend_rect_bg: OnceCell<RGBColor>,
+
 
     line1_color_str: String,
     line2_color_str: String,
@@ -60,7 +73,9 @@ struct PlotConfigData {
     line2_color: OnceCell<RGBColor>,
 
     stroke_size: u32,
+    #[serde(default)]
     copper_oil_top: f64,
+    #[serde(default)]
     short_period: i32,
 }
 
@@ -81,6 +96,8 @@ impl Default for Config {
             plot_conf: PlotConfigData {
                 plot_width: 1280,
                 plot_height: 720,
+                bg_color_str: String::from("WHITE"),
+                bg_color: OnceCell::new(),
                 
                 title_font: String::from("黑体"),
                 title_size: 72.0,
@@ -93,10 +110,14 @@ impl Default for Config {
 
                 legend_font: String::from("仿宋"),
                 legend_size: 56.0,
+                legend_rectangle: [0, -3, 32, 3],
+                legend_rect_bd_str: String::from("BLACK"),
+                legend_rect_bg_str: String::from("WHITE"),
+                legend_rect_bd: OnceCell::new(),
+                legend_rect_bg: OnceCell::new(),
 
                 line1_color_str: String::from("RED"),
                 line2_color_str: String::from("BLUE"),
-
                 line1_color: OnceCell::new(),
                 line2_color: OnceCell::new(),
 
@@ -111,15 +132,6 @@ impl Default for Config {
     }
 }
 
-macro_rules! str2color {
-    ($e:expr; $($c:ident),+; $d:expr) => {
-        match $e {
-            $(stringify!($c) => $c,)+
-            _ => $d,
-        }
-    };
-}
-
 trait DataConfig {
     fn date_shift(&self) -> &Vec<u64>;
 }
@@ -131,21 +143,43 @@ impl DataConfig for DataConfigData {
 }
 
 type Period = NonZero<i32>;
+type RectangleCorner = [i32; 4];
 
 trait PlotConfig {
     fn x_label_area_size(&self) -> i32;
     fn y_label_area_size(&self) -> i32;
     fn line1_color(&self) -> RGBColor;
     fn line2_color(&self) -> RGBColor;
-    fn title_style(&self) -> (&str, f64);
-    fn label_style(&self) -> (&str, f64);
-    fn legend_style(&self) -> (&str, f64);
+    fn title_style(&'_ self) -> TextStyle<'_>;
+    fn label_style(&'_ self) -> TextStyle<'_>;
+    fn legend_style(&'_ self) -> TextStyle<'_>;
+    fn legend_rectangle(&self) -> RectangleCorner;
+    fn legend_rect_bd(&self) -> RGBColor;
+    fn legend_rect_bg(&self) -> RGBColor;
     fn plot_size(&self) -> (u32, u32);
     fn plot_width(&self) -> u32;
+    fn bg_color(&self) -> RGBColor;
     fn line1_stroke_style(&self) -> ShapeStyle;
     fn line2_stroke_style(&self) -> ShapeStyle;
     fn copper_oil_top(&self) -> Option<f64>;
     fn period(&self) -> Vec<Option<Period>>;
+}
+
+macro_rules! str2color {
+    ($e:expr; $($c:ident),+; $d:expr) => {
+        match $e {
+            $(stringify!($c) => $c,)+
+            _ => $d,
+        }
+    };
+}
+
+macro_rules! fn_color {
+    ($id:ident, $strid:ident) => {
+        fn $id(&self) -> RGBColor {
+            self.$id.get_or_init(||PlotConfigData::str2color(&self.$strid)).clone()
+        }
+    };
 }
 
 impl PlotConfigData {
@@ -168,25 +202,27 @@ impl PlotConfig for PlotConfigData {
         self.y_label_area_size
     }
 
-    fn line1_color(&self) -> RGBColor {
-        self.line1_color.get_or_init(||PlotConfigData::str2color(&self.line1_color_str)).to_owned()
+    fn_color!(line1_color, line1_color_str);
+    fn_color!(line2_color, line2_color_str);
+
+    fn title_style(&'_ self) -> TextStyle<'_> {
+        (self.title_font.as_str(), self.title_size).into()
     }
 
-    fn line2_color(&self) -> RGBColor {
-        self.line2_color.get_or_init(||PlotConfigData::str2color(&self.line2_color_str)).to_owned()
+    fn label_style(&'_ self) -> TextStyle<'_> {
+        (self.label_font.as_str(), self.label_size).into()
     }
 
-    fn title_style(&self) -> (&str, f64) {
-        (self.title_font.as_str(), self.title_size)
+    fn legend_style(&'_ self) -> TextStyle<'_> {
+        (self.legend_font.as_str(), self.legend_size).into()
     }
 
-    fn label_style(&self) -> (&str, f64) {
-        (self.label_font.as_str(), self.label_size)
+    fn legend_rectangle(&self) -> RectangleCorner {
+        self.legend_rectangle
     }
 
-    fn legend_style(&self) -> (&str, f64) {
-        (self.legend_font.as_str(), self.legend_size)
-    }
+    fn_color!(legend_rect_bd, legend_rect_bd_str);
+    fn_color!(legend_rect_bg, legend_rect_bg_str);
 
     fn plot_size(&self) -> (u32, u32) {
         (self.plot_width, self.plot_height)
@@ -195,6 +231,8 @@ impl PlotConfig for PlotConfigData {
     fn plot_width(&self) -> u32 {
         self.plot_width
     }
+
+    fn_color!(bg_color, bg_color_str);
 
     fn line1_stroke_style(&self) -> ShapeStyle {
         ShapeStyle {
@@ -213,11 +251,12 @@ impl PlotConfig for PlotConfigData {
     }
 
     fn copper_oil_top(&self) -> Option<f64> {
-        self.copper_oil_top.into()
+        (self.copper_oil_top != 0.0).then_some(self.copper_oil_top)
     }
 
     fn period(&self) -> Vec<Option<Period>> {
-        vec![None, NonZero::new(self.short_period)]
+        let p = NonZero::new(self.short_period);
+        if p.is_some() {vec![None, p]} else {vec![None]}
     }
 }
 
@@ -391,8 +430,8 @@ fn process_data((data, config): (MainData, &impl DataConfig))
     let dates_shift = |dt| 
         DataColumn::fromdate(format!("推后{dt}天"), dates.iter().filter_map(date_shift(dt)).collect());
 
-    let copper_oil:Vec<DataColumn> = timedeltas.iter().copied()
-        .map(dates_shift).chain(std::iter::once(copper_oil))
+    let copper_oil:Vec<DataColumn> = timedeltas.iter().copied().map(dates_shift)
+        .chain(std::iter::once(copper_oil))
         .collect();
 
     Ok(MainData{copper_oil, indices})
@@ -574,8 +613,13 @@ where
         = plot_range(s1, s2, duration, config.copper_oil_top(),config.plot_width())?;
     println!("#size of series: {},{}", s1.len(), s2.len());
 
+    let legend_rect = move |x:i32, y:i32| {
+        let corner = config.legend_rectangle();
+        [(x + corner[0], y + corner[1]), (x + corner[2], y + corner[3])]
+    };
+
     let root = BitMapBackend::new(&file, config.plot_size()).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&config.bg_color())?;
 
     let mut chart = ChartBuilder::on(&root)
         .caption(&caption, config.title_style())
@@ -584,8 +628,9 @@ where
         .build_cartesian_2d(x_range.clone(), yl_range)?
         .set_secondary_coord(x_range, yr_range);
 
+
     chart.draw_series(LineSeries::new(s2,config.line2_stroke_style()))?
-        .label(t2).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line2_color().filled()));
+        .label(t2).legend(|(x, y)| Rectangle::new(legend_rect(x,y), config.line2_color().filled()));
 
     chart.configure_mesh()
         .x_label_style(config.label_style())
@@ -594,10 +639,12 @@ where
         .draw()?;
 
     chart.draw_secondary_series(LineSeries::new(s1,config.line1_stroke_style()))?
-        .label(t1).legend(|(x, y)| Rectangle::new([(x,y-3),(x+32,y+3)], config.line1_color().filled()));
+        .label(t1).legend(|(x, y)| Rectangle::new(legend_rect(x,y), config.line1_color().filled()));
 
     chart.configure_series_labels().position(SeriesLabelPosition::UpperLeft)
-        .border_style(BLACK).background_style(WHITE).label_font(config.legend_style())
+        .border_style(config.legend_rect_bd())
+        .background_style(config.legend_rect_bg())
+        .label_font(config.legend_style())
         .draw()?;
 
     root.present()?;
@@ -648,7 +695,9 @@ impl<'a, X: Copy, Y: Into<AnyNum> + Copy> IntoIterator for &'a PointIter<'a, X, 
     }
 }
 
-type PlotItem<'a> = (usize,(Option<Period>,&'a PointIter<'a, NaiveDate, f64>,&'a PointIter<'a, NaiveDate, f64>));
+type SeriesIter<'a> = PointIter<'a, NaiveDate, f64>;
+
+type PlotItem<'a> = (usize,(Option<Period>,&'a SeriesIter<'a>,&'a SeriesIter<'a>));
 
 fn except_index<S: AsRef<str>>(name: S) -> impl Fn(&PlotItem) -> bool
 {
@@ -669,14 +718,14 @@ fn index_header<'a>(_: &str, y: &'a str) -> &'a str { y }
 fn dateshift_header(x: &str, y: &str) -> String { format!("{y}({x})") }
 
 fn multi_xy<'a, F, H>(data: &'a Vec<DataColumn>, header: F)
-    -> Result<Vec<PointIter<'a, NaiveDate, f64>>, Box<dyn Error>>
+    -> Result<Vec<SeriesIter<'a>>, Box<dyn Error>>
 where
     F: Fn(&'a str, &'a str) -> H,
     H: Into<Cow<'a, str>>,
 {
     let result = iproduct!(data.iter().rev().filter_map(DataColumn::to_date),data.iter().rev().filter_map(DataColumn::to_f64))
         .map(|(x,y)|PointIter::new(header(x.header, y.header), x, y))
-        .collect::<Vec<PointIter<NaiveDate, f64>>>();
+        .collect::<Vec<SeriesIter>>();
 
     if result.len() > 0 {Ok(result)} else {Err("main data error".into())}
 }
