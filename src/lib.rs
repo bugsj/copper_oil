@@ -99,16 +99,16 @@ impl Default for Config {
                 bg_color_str: String::from("WHITE"),
                 bg_color: OnceCell::new(),
                 
-                title_font: String::from("黑体"),
+                title_font: String::from("Heiti SC"),
                 title_size: 72.0,
 
-                label_font: String::from("仿宋"),
+                label_font: String::from("STFangsong"),
                 label_size: 40.0,
 
                 x_label_area_size: 60,
                 y_label_area_size: 120,
 
-                legend_font: String::from("仿宋"),
+                legend_font: String::from("STFangsong"),
                 legend_size: 56.0,
                 legend_rectangle: [0, -3, 32, 3],
                 legend_rect_bd_str: String::from("BLACK"),
@@ -769,7 +769,7 @@ fn with<'a, D, C>(conf: &'a C) -> impl Fn(D) -> (D, &'a C) {
 pub fn read_and_plot_data(mut args: impl Iterator<Item = String>)
     -> Result<(), Box<dyn Error>>
 {
-    let load_conf_default = ||load_conf_file(".\\config.json");
+    let load_conf_default = ||load_conf_file("config.json");
     let data_path = args.next();
     let conf_path = args.next();
     let conf = LazyCell::new(||conf_path.as_ref()

@@ -3,3 +3,5 @@
 *.bat
 copper_oil.csv
 gold.csv
+config.json
+.DS_Store
